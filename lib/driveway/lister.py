@@ -1,0 +1,532 @@
+#!/usr/bin/env python3
+"""Enumerate drives for gdeyoung.driveway (lib/driveway/lister.py).
+
+Vendored from jgarza9788/drives bin/drives-list @ 255609e (MIT) — see
+NOTICE.md. Changes: collect() refactor for CLI import, --include-root
+System row, internal ESP/boot partition filter, unix-socket rc detection.
+
+Prints one JSON object: {"drives": [...], "error": ""}. A drive is every
+filesystem on a disk other than the one hosting / — mounted, or (with
+--unmounted) mountable/unlockable but not mounted yet — plus, with
+--network, network shares and cloud mounts. Each entry:
+
+  key          stable id (device path, or mountpoint for non-block mounts)
+  name path disk diskName label mountpoint fstype fsver uuid
+  kind         thumb | external | internal | sd | optical | image
+               network | gdrive | onedrive | dropbox | cloud
+  mounted      false = offer Mount (or Unlock when locked)
+  locked       LUKS container not opened yet
+  encrypted    lives inside a LUKS container; luksPath = backing partition
+  readOnly     mounted read-only
+  size used pct                       bytes (size = partition size if unmounted)
+  removable    eject powers the disk off
+  eject        udisks | loop | fuse | gio | "" (how it comes off)
+  vendor model serial transport usbSpeed    for the Info panel
+  pending      rclone uploads queued/in progress, -1 = unknown
+"""
+
+import argparse
+import http.client
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+
+NETWORK_FSTYPES = "nfs,nfs4,cifs,smb3,smbfs,fuse.sshfs,davfs,9p"
+
+# Model strings that give a USB stick away. Everything else on USB is sorted
+# by size (--thumb-max-gb): sticks rarely pass 256G, portable drives rarely
+# go under it. ROTA is useless here — most flash bridges report rotational.
+THUMB_MODEL = re.compile(
+    r"flash|cruzer|datatraveler|ultra fit|ultra usb|jumpdrive|thumb|pen ?drive|"
+    r"stick|ufd|dt ?[0-9]|traveler|blade|fit plus|u disk|udisk", re.I)
+SD_MODEL = re.compile(r"\bsd\b|sd/mmc|mmc|card ?reader|microsd|sdxc|sdhc|multi-card", re.I)
+IMAGE_ROOTS = ("/run/media/", "/media/", "/mnt/")
+# Filesystems worth offering a Mount button for.
+UNMOUNTED_SKIP = {"swap", "crypto_LUKS", "LVM2_member", "linux_raid_member", "zfs_member", "bcache"}
+
+# statvfs on a mount whose server went away can block forever (uninterruptibly,
+# for hard NFS), so network usage is read in child processes we can abandon.
+NET_USAGE_TIMEOUT = 2.0
+STATVFS_CHILD = (
+    "import os, sys\n"
+    "s = os.statvfs(sys.argv[1])\n"
+    "print(s.f_blocks * s.f_frsize, (s.f_blocks - s.f_bfree) * s.f_frsize,"
+    " int(bool(s.f_flag & os.ST_RDONLY)))")
+
+# rc's /vfs/stats reply is a few hundred bytes; refuse anything far larger.
+RCLONE_RC_MAX_BYTES = 64 * 1024
+# Whole-request deadline; urlopen's timeout only bounds each socket read.
+RCLONE_RC_TIMEOUT = 1.0
+
+# rclone backend type -> kind; gvfs mount prefix -> kind.
+RCLONE_KINDS = {"drive": "gdrive", "onedrive": "onedrive", "dropbox": "dropbox"}
+GVFS_KINDS = {
+    "google-drive": "gdrive", "onedrive": "onedrive",
+    "smb-share": "network", "sftp": "network", "dav": "network", "davs": "network",
+    "ftp": "network", "nfs": "network", "afp-volume": "network",
+}
+USB_SPEEDS = {"1.5": "USB 1.0", "12": "USB 1.1", "480": "USB 2.0", "5000": "USB 3.0 (5 Gb/s)",
+              "10000": "USB 3.1 (10 Gb/s)", "20000": "USB 3.2 (20 Gb/s)", "40000": "USB4 (40 Gb/s)"}
+
+
+def run(cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def root_disk_name():
+    """Name (sda/nvme0n1) of the disk hosting /, or None."""
+    src = run(["findmnt", "-n", "-o", "SOURCE", "/"])
+    if not src.startswith("/dev/"):
+        return None
+    dev = src.split("[", 1)[0]  # strip btrfs subvol suffix like [/@]
+    # `lsblk -s` walks up through LUKS/LVM; the last line is the top disk.
+    chain = run(["lsblk", "-s", "-no", "NAME", dev]).splitlines()
+    names = [re.sub(r"^[\s└─├│]*", "", line) for line in chain]
+    names = [n for n in names if n]
+    return names[-1] if names else dev[len("/dev/"):]
+
+
+def usage(mountpoint):
+    """(size, used, readOnly) from statvfs; zeros if it can't be read."""
+    try:
+        st = os.statvfs(mountpoint)
+    except OSError:
+        return 0, 0, False
+    size = st.f_blocks * st.f_frsize
+    used = (st.f_blocks - st.f_bfree) * st.f_frsize
+    return size, used, bool(st.f_flag & os.ST_RDONLY)
+
+
+def bounded_usage(mountpoints, timeout=NET_USAGE_TIMEOUT):
+    """mountpoint -> (size, used, readOnly), all queried in parallel; zeros
+    for any that can't be read or don't answer within timeout."""
+    procs = {}
+    for m in mountpoints:
+        try:
+            procs[m] = subprocess.Popen([sys.executable, "-c", STATVFS_CHILD, m],
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, text=True)
+        except OSError:
+            pass
+    deadline = time.monotonic() + timeout
+    out = {}
+    for m in mountpoints:
+        out[m] = (0, 0, False)
+        p = procs.get(m)
+        if p is None:
+            continue
+        try:
+            size, used, ro = p.communicate(timeout=max(0, deadline - time.monotonic()))[0].split()
+            out[m] = (int(size), int(used), ro == "1")
+        except subprocess.TimeoutExpired:
+            # Reap it if SIGKILL works (FUSE waits are killable), but don't
+            # wait on hard NFS, which only lets go once the server answers.
+            # It holds none of our fds, so we can exit either way.
+            p.kill()
+            p.stdout.close()
+            try:
+                p.wait(timeout=0.05)
+            except subprocess.TimeoutExpired:
+                pass
+        except ValueError:
+            pass  # statvfs failed in the child
+    return out
+
+
+def fill_usage(drives):
+    use = bounded_usage([d["mountpoint"] for d in drives])
+    for d in drives:
+        d["size"], d["used"], d["readOnly"] = use[d["mountpoint"]]
+        d["pct"] = pct(d["used"], d["size"])
+
+
+def pct(used, size):
+    return round(used * 100 / size) if size else 0
+
+
+def usb_speed(disk_name):
+    """'USB 3.0 (5 Gb/s)' for a USB disk, walking sysfs up to the USB device."""
+    try:
+        d = os.path.realpath("/sys/block/%s/device" % disk_name)
+    except OSError:
+        return ""
+    while d and d != "/":
+        speed = os.path.join(d, "speed")
+        if os.path.isfile(speed) and os.path.isfile(os.path.join(d, "idVendor")):
+            with open(speed) as f:
+                raw = f.read().strip()
+            return USB_SPEEDS.get(raw, raw + " Mb/s")
+        d = os.path.dirname(d)
+    return ""
+
+
+def disk_kind(disk, thumb_max_bytes):
+    tran = (disk.get("tran") or "").lower()
+    name = disk.get("name") or ""
+    model = " ".join(filter(None, [disk.get("vendor"), disk.get("model")])).strip()
+    if disk.get("type") == "rom" or name.startswith("sr"):
+        return "optical"
+    if disk.get("type") == "loop":
+        return "image"
+    if name.startswith("mmcblk") or tran == "mmc" or SD_MODEL.search(model):
+        return "sd"
+    removable = tran == "usb" or bool(disk.get("hotplug"))
+    if not removable:
+        return "internal"
+    if THUMB_MODEL.search(model):
+        return "thumb"
+    return "thumb" if int(disk.get("size") or 0) <= thumb_max_bytes else "external"
+
+
+def connection(disk, kind):
+    tran = (disk.get("tran") or "").lower()
+    if tran == "usb":
+        return usb_speed(disk.get("name") or "") or "USB"
+    return {"nvme": "NVMe", "sata": "SATA", "ata": "ATA", "mmc": "SD/MMC", "scsi": "SCSI"}.get(
+        tran, "Loop device" if kind == "image" else tran.upper())
+
+
+def block_entry(node, disk, kind, conn, luks, label_fallback, mountpoint):
+    removable = kind in ("thumb", "external", "sd", "optical") or bool(disk.get("rm") or disk.get("hotplug"))
+    if mountpoint:
+        size, used, ro = usage(mountpoint)
+    else:
+        size, used, ro = int(node.get("size") or 0), 0, bool(node.get("ro"))
+    locked = node.get("fstype") == "crypto_LUKS"
+    return {
+        "key": node.get("path") or "",
+        "name": node.get("name") or "",
+        "path": node.get("path") or "",
+        "disk": disk.get("path") or "",
+        "diskName": disk.get("name") or "",
+        "label": node.get("label") or label_fallback or "",
+        "mountpoint": mountpoint or "",
+        "fstype": node.get("fstype") or "",
+        "fsver": node.get("fsver") or "",
+        "uuid": node.get("uuid") or "",
+        "kind": kind,
+        "mounted": bool(mountpoint),
+        "locked": locked,
+        "encrypted": bool(luks) or locked,
+        "luksPath": (luks or {}).get("path", "") or (node.get("path") if locked else ""),
+        "readOnly": ro,
+        "size": size,
+        "used": used,
+        "pct": pct(used, size) if mountpoint else 0,
+        "removable": removable,
+        "eject": ("loop" if kind == "image" else "udisks") if mountpoint else "",
+        "vendor": (disk.get("vendor") or "").strip(),
+        "model": (disk.get("model") or "").strip(),
+        "serial": (disk.get("serial") or "").strip(),
+        "transport": (disk.get("tran") or "").lower(),
+        "connection": conn,
+        "pending": -1,
+    }
+
+
+def block_drives(thumb_max_bytes, unmounted, min_unmounted_bytes):
+    raw = run(["lsblk", "-J", "-b", "-o",
+               "NAME,PATH,LABEL,MOUNTPOINTS,FSTYPE,FSVER,UUID,TRAN,RM,HOTPLUG,RO,"
+               "TYPE,SIZE,VENDOR,MODEL,SERIAL"])
+    data = json.loads(raw)
+    root = root_disk_name()
+    drives = []
+    for disk in data.get("blockdevices") or []:
+        name = disk.get("name") or ""
+        if name == root or name.startswith("zram"):
+            continue
+        kind = disk_kind(disk, thumb_max_bytes)
+        conn = connection(disk, kind)
+
+        # Walk partitions and nested crypt/lvm children. The backing LUKS
+        # partition's label names a mapper that has none of its own.
+        def walk(node, inherited_label, luks):
+            mounts = [m for m in (node.get("mountpoints") or []) if m and m != "[SWAP]"]
+            # Loop devices back snaps, flatpak bits etc.; only user-mounted
+            # images (udisks loop-setup, `mount -o loop` under /mnt) count.
+            if kind == "image":
+                mounts = [m for m in mounts if m.startswith(IMAGE_ROOTS)]
+            children = node.get("children") or []
+            fstype = node.get("fstype") or ""
+            label = node.get("label") or inherited_label or ""
+            # driveway: EFI/boot helper partitions on internal disks are noise.
+            if kind == "internal" and (fstype == "vfat" or fstype == "esp") \
+                    and re.search(r"(?i)efi|esp|boot", label or ""):
+                return
+            if mounts:
+                drives.append(block_entry(node, disk, kind, conn, luks, inherited_label, mounts[0]))
+            elif (unmounted and kind != "image" and fstype
+                  and (fstype not in UNMOUNTED_SKIP or (fstype == "crypto_LUKS" and not children))
+                  and int(node.get("size") or 0) >= min_unmounted_bytes
+                  and not children):
+                drives.append(block_entry(node, disk, kind, conn, luks, inherited_label, ""))
+            for child in children:
+                walk(child, node.get("label") or inherited_label,
+                     node if fstype == "crypto_LUKS" else luks)
+
+        walk(disk, None, None)
+    return drives
+
+
+def system_entry():
+    """The disk hosting /, as one read-only row (the 'Macintosh HD' slot)."""
+    src = run(["findmnt", "-n", "-o", "SOURCE,FSTYPE", "/"]).split(None, 1)
+    fstype = src[1].strip() if len(src) > 1 else ""
+    size, used, ro = usage("/")
+    return {
+        "key": "/", "name": "System", "path": "", "disk": "", "diskName": "",
+        "label": "System", "mountpoint": "/", "fstype": fstype, "fsver": "",
+        "uuid": "", "kind": "system", "mounted": True, "locked": False,
+        "encrypted": False, "luksPath": "", "readOnly": ro,
+        "size": size, "used": used, "pct": pct(used, size),
+        "removable": False, "eject": "", "vendor": "", "model": "", "serial": "",
+        "transport": "", "connection": "", "pending": -1,
+    }
+
+
+def plain_entry(label, mountpoint, source, fstype, kind, eject):
+    """A non-block mount. Usage is left at zero for fill_usage()."""
+    return {
+        "key": mountpoint, "name": source, "path": source, "disk": "", "diskName": "",
+        "label": label, "mountpoint": mountpoint, "fstype": fstype, "fsver": "", "uuid": "",
+        "kind": kind, "mounted": True, "locked": False, "encrypted": False, "luksPath": "",
+        "readOnly": False, "size": 0, "used": 0, "pct": 0,
+        "removable": False, "eject": eject, "vendor": "", "model": "", "serial": "",
+        "transport": "network", "connection": "", "pending": -1,
+    }
+
+
+def findmnt(types):
+    raw = run(["findmnt", "-J", "-t", types, "-o", "TARGET,SOURCE,FSTYPE"])
+    return (json.loads(raw).get("filesystems") or []) if raw else []
+
+
+def basename(path):
+    return os.path.basename(path.rstrip("/")) or path
+
+
+def network_drives():
+    drives = []
+    for fs in findmnt(NETWORK_FSTYPES):
+        d = plain_entry(basename(fs["target"]), fs["target"], fs.get("source") or "",
+                        fs.get("fstype") or "", "network", "")
+        # sshfs is a user FUSE mount, so it can come off without root.
+        if (fs.get("fstype") or "").startswith("fuse."):
+            d["eject"] = "fuse"
+        d["connection"] = fs.get("fstype") or ""
+        drives.append(d)
+    return drives
+
+
+def rclone_mounts():
+    """[(args after `mount`, rc)] for this user's `rclone mount --rc` processes.
+
+    rc is ("http", url) or ("unix", socket path) depending on --rc-addr."""
+    found = []
+    for pid in run(["pgrep", "-u", str(os.getuid()), "-x", "rclone"]).split():
+        try:
+            with open("/proc/%s/cmdline" % pid, "rb") as f:
+                args = f.read().decode(errors="replace").split("\0")[1:]
+        except OSError:
+            continue
+        verb = next((a for a in ("mount", "cmount") if a in args), None)
+        if verb is None:
+            continue
+        if not any(a == "--rc" or a.startswith(("--rc=", "--rc-addr")) for a in args):
+            continue
+        addr = "localhost:5572"
+        for j, a in enumerate(args):
+            if a.startswith("--rc-addr="):
+                addr = a.split("=", 1)[1]
+            elif a == "--rc-addr" and j + 1 < len(args):
+                addr = args[j + 1]
+        if addr.startswith("unix://"):
+            rc = ("unix", addr[len("unix://"):])
+        else:
+            if addr.startswith(":"):
+                addr = "localhost" + addr
+            rc = ("http", "http://" + addr)
+        found.append((args[args.index(verb) + 1:], rc))
+    return found
+
+
+def rc_url_for(mounts, source):
+    """rc endpoint of the rclone process serving `source` ("gdrive:docs"), or
+    None.
+
+    Flags can sit anywhere around the remote (`mount --vfs-cache-mode writes
+    gdrive: ~/g`), so look for it among the arguments rather than by position.
+    """
+    remote = source.split(":", 1)[0]
+    for exact in (True, False):
+        for args, rc in mounts:
+            for a in args:
+                if a.startswith("-") or ":" not in a:
+                    continue
+                if a == source if exact else a.split(":", 1)[0] == remote:
+                    return rc
+    return None
+
+
+def rclone_pending(url, fs, timeout=RCLONE_RC_TIMEOUT):
+    """Uploads queued + in progress for the VFS of `fs` ("gdrive:docs"), or -1
+    if rc won't say within `timeout` seconds overall."""
+    # A server trickling bytes resets urlopen's per-read timeout forever, so
+    # the request runs on a daemon thread that we stop waiting for (and that
+    # can't keep the process alive) at the deadline.
+    result = [-1]
+
+    def ask():
+        result[0] = _rclone_pending(url, fs, timeout)
+
+    worker = threading.Thread(target=ask, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    return -1 if worker.is_alive() else result[0]
+
+
+def _rclone_pending(rc, fs, timeout=RCLONE_RC_TIMEOUT):
+    try:
+        scheme, where = rc
+        if scheme == "unix":
+            conn = UnixRcConnection(where, timeout)
+            conn.request("POST", "/vfs/stats", body=json.dumps({"fs": fs}),
+                         headers={"Content-Type": "application/json"})
+            resp = conn.getresponse()
+            body = resp.read(RCLONE_RC_MAX_BYTES + 1)
+            conn.close()
+        else:
+            req = urllib.request.Request(where + "/vfs/stats", method="POST",
+                                         data=json.dumps({"fs": fs}).encode(),
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read(RCLONE_RC_MAX_BYTES + 1)
+        if len(body) > RCLONE_RC_MAX_BYTES:
+            return -1
+        cache = json.loads(body).get("diskCache") or {}
+        return int(cache.get("uploadsInProgress", 0)) + int(cache.get("uploadsQueued", 0))
+    except Exception:
+        return -1
+
+
+class UnixRcConnection(http.client.HTTPConnection):
+    """HTTP over a rclone rc unix socket (stdlib only)."""
+
+    def __init__(self, path, timeout=RCLONE_RC_TIMEOUT):
+        super().__init__("localhost", timeout=timeout)
+        self.rc_path = path
+
+    def connect(self):
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        sock.connect(self.rc_path)
+        self.sock = sock
+
+
+def rclone_drives():
+    mounts = findmnt("fuse.rclone")
+    if not mounts:
+        return []
+    # "gdrive:      drive" -> {"gdrive": "drive"}
+    types = {}
+    for line in run(["rclone", "listremotes", "--long"]).splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            types[parts[0].rstrip(":")] = parts[1]
+    rc_mounts = rclone_mounts()
+    drives = []
+    for fs in mounts:
+        source = fs.get("source") or ""
+        remote = source.split(":", 1)[0]
+        kind = RCLONE_KINDS.get(types.get(remote, ""), "cloud")
+        d = plain_entry(remote or basename(fs["target"]), fs["target"], source, "rclone", kind, "fuse")
+        d["connection"] = "rclone " + (types.get(remote) or "remote")
+        rc = rc_url_for(rc_mounts, source)
+        if rc:
+            d["pending"] = rclone_pending(rc, source)
+        drives.append(d)
+    return drives
+
+
+def gvfs_drives():
+    # GNOME Online Accounts / Nautilus "Other Locations" mounts show up as
+    # directories under the single gvfsd-fuse mount, not as mounts of their own.
+    root = "/run/user/%d/gvfs" % os.getuid()
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return []
+    drives = []
+    for name in names:
+        scheme, _, rest = name.partition(":")
+        kind = GVFS_KINDS.get(scheme)
+        if kind is None:
+            continue  # mtp phones, cameras, etc. are not drives
+        # "google-drive:host=gmail.com,user=someone" -> "someone@gmail.com"
+        params = dict(p.split("=", 1) for p in rest.split(",") if "=" in p)
+        label = params.get("user", "")
+        if params.get("host"):
+            label = (label + "@" if label else "") + params["host"]
+        if params.get("share"):
+            label = params["share"] + " on " + params.get("server", params.get("host", ""))
+        mountpoint = os.path.join(root, name)
+        # Usage of a cloud gvfs dir can block on the network; leave it unknown.
+        d = plain_entry(label or scheme, mountpoint, name, "gvfs " + scheme, kind, "gio")
+        d["connection"] = "GNOME " + scheme
+        drives.append(d)
+    return drives
+
+
+def collect(network=True, unmounted=True, min_unmounted_mb=64, thumb_max_gb=256,
+            include_root=True):
+    """The full drive list as a dict; each source fails alone (a broken lsblk
+    must not hide network drives)."""
+    sources = [lambda: block_drives(int(thumb_max_gb * 1024 ** 3), unmounted,
+                                    int(min_unmounted_mb * 1024 ** 2))]
+    if network:
+        def mounted_network():
+            drives = network_drives() + rclone_drives()
+            fill_usage(drives)
+            return drives
+        sources += [mounted_network, gvfs_drives]
+    drives, errors = [], []
+    for source in sources:
+        try:
+            drives += source()
+        except Exception as exc:
+            errors.append(str(exc) or type(exc).__name__)
+    if include_root:
+        drives.insert(0, system_entry())
+    return {"drives": drives, "error": "; ".join(errors)}
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--network", action="store_true",
+                        help="include network shares and cloud drives")
+    parser.add_argument("--unmounted", action="store_true",
+                        help="include filesystems that are plugged in but not mounted")
+    parser.add_argument("--min-unmounted-mb", type=float, default=64,
+                        help="hide unmounted partitions smaller than this (EFI/boot helpers)")
+    parser.add_argument("--thumb-max-gb", type=float, default=256,
+                        help="USB disks at or under this size count as thumb drives")
+    parser.add_argument("--include-root", action="store_true",
+                        help="include a read-only System row for the disk hosting /")
+    args = parser.parse_args()
+    print(json.dumps(collect(network=args.network, unmounted=args.unmounted,
+                             min_unmounted_mb=args.min_unmounted_mb,
+                             thumb_max_gb=args.thumb_max_gb,
+                             include_root=args.include_root)))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""Mount / unlock / lock / eject for gdeyoung.driveway (lib/driveway/actions.py).
+
+Vendored from jgarza9788/drives bin/drives-action @ 255609e (MIT) — see
+NOTICE.md. Changes: importable handlers (main kept for standalone use),
+notification app name.
+
+  actions eject  --mode udisks|loop|fuse|gio --mount M [--dev D] [--disk W]
+                       [--luks L] [--removable] [--kill] --name N
+  drives-action mount  --dev D --name N
+  drives-action unlock --dev D --name N      (interactive: run in a terminal)
+  drives-action lock   --dev MAPPER --luks L [--mount M] --name N
+  drives-action busy   --mount M
+
+Prints one JSON line: {"status": "ok"|"busy"|"error", "message", "procs",
+"mountpoint"} and sends a desktop notification for the outcome.
+
+Before unmounting, eject looks for processes holding files under the
+mountpoint (cwd, open files, mapped libraries). If any, it refuses and
+reports them — unless --kill, which SIGTERMs them (SIGKILL after 2s) first.
+--kill never touches this helper's own ancestors (the bar shell, Hyprland,
+the session): those stay listed as busy instead.
+Only this user's processes are visible; root-held files still fail at
+unmount and show udisks' own error.
+"""
+
+import argparse
+import json
+import os
+import re
+import select
+import signal
+import subprocess
+import sys
+import time
+
+
+def run(cmd):
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    return p.returncode, (p.stdout + p.stderr).strip()
+
+
+def notify(title, body="", urgent=False):
+    cmd = ["notify-send", "-a", "Driveway", title, body]
+    if urgent:
+        cmd[1:1] = ["-u", "critical"]
+    subprocess.run(cmd, capture_output=True)
+
+
+def done(status, message="", **extra):
+    print(json.dumps(dict(status=status, message=message, **extra)))
+    sys.exit(0 if status == "ok" else 2 if status == "busy" else 1)
+
+
+def under(path, mount):
+    return path == mount or path.startswith(mount.rstrip("/") + "/")
+
+
+def start_time(pid):
+    """Boot-relative start time of pid (stat field 22), or None if gone."""
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            # comm (field 2) may contain spaces or ')'; fields resume after the last ')'.
+            return int(f.read().rsplit(")", 1)[1].split()[19])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def ancestors():
+    """PIDs above this process: the bar shell, Hyprland, systemd --user, ….
+
+    Killing one would take the desktop (and this helper) down with it.
+    """
+    pids = set()
+    pid = os.getppid()
+    while pid > 1 and pid not in pids:
+        pids.add(pid)
+        try:
+            with open("/proc/%d/stat" % pid) as f:
+                pid = int(f.read().rsplit(")", 1)[1].split()[1])  # field 4: ppid
+        except (OSError, IndexError, ValueError):
+            break
+    return pids
+
+
+def busy_procs(mount):
+    """[{pid, name, start}] for processes of ours with anything open under mount."""
+    me = os.getpid()
+    procs = []
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        if int(pid) == me:
+            continue
+        base = "/proc/" + pid
+        paths = []
+        for link in ("cwd", "root", "exe"):
+            try:
+                paths.append(os.readlink(os.path.join(base, link)))
+            except OSError:
+                pass
+        try:
+            for fd in os.listdir(base + "/fd"):
+                try:
+                    paths.append(os.readlink(base + "/fd/" + fd))
+                except OSError:
+                    pass
+        except OSError:
+            continue  # not ours
+        try:
+            with open(base + "/maps") as f:
+                paths += [line.split(None, 5)[5].strip() for line in f if len(line.split(None, 5)) == 6]
+        except OSError:
+            pass
+        # A root of "/" would match every mount; only a chroot into it counts.
+        if any(under(p, mount) for p in paths if p and p != "/"):
+            try:
+                with open(base + "/comm") as f:
+                    name = f.read().strip()
+            except OSError:
+                name = "?"
+            procs.append({"pid": int(pid), "name": name, "start": start_time(int(pid))})
+    return procs
+
+
+def terminate(procs):
+    """SIGTERM procs, then SIGKILL whatever is left after 2s. Ancestors are skipped.
+
+    Signals go through pidfds so a PID that exits and gets reused meanwhile
+    is never hit. A pidfd pins whatever holds the PID when it's opened, so
+    the start time is re-checked after opening to confirm it's still the
+    process busy_procs saw.
+    """
+    fds = []
+    protected = ancestors()
+    for p in procs:
+        if p["pid"] in protected:
+            continue
+        try:
+            fd = os.pidfd_open(p["pid"])
+        except OSError:
+            continue  # already gone
+        if p["start"] is None or start_time(p["pid"]) != p["start"]:
+            os.close(fd)  # exited and PID reused since the scan
+            continue
+        fds.append(fd)
+    try:
+        for fd in fds:
+            try:
+                signal.pidfd_send_signal(fd, signal.SIGTERM)
+            except OSError:
+                pass
+        # A pidfd polls readable once its process exits.
+        poller = select.poll()
+        for fd in fds:
+            poller.register(fd, select.POLLIN)
+        live = set(fds)
+        deadline = time.monotonic() + 2
+        while live and (left := deadline - time.monotonic()) > 0:
+            for fd, _ in poller.poll(left * 1000):
+                live.discard(fd)
+                poller.unregister(fd)
+        for fd in live:
+            try:
+                signal.pidfd_send_signal(fd, signal.SIGKILL)
+            except OSError:
+                pass
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+def proc_list(procs):
+    return ", ".join("%s (%d)" % (p["name"], p["pid"]) for p in procs[:6]) + \
+        (" …" if len(procs) > 6 else "")
+
+
+def cmd_busy(a):
+    procs = busy_procs(a.mount)
+    done("busy" if procs else "ok", proc_list(procs), procs=procs)
+
+
+def cmd_eject(a):
+    procs = busy_procs(a.mount) if a.mount else []
+    if procs and a.kill:
+        terminate(procs)
+        time.sleep(0.2)
+        procs = busy_procs(a.mount)
+    if procs:
+        notify("%s is busy" % a.name, "In use by " + proc_list(procs), urgent=True)
+        done("busy", "in use by " + proc_list(procs), procs=procs)
+
+    if a.mode == "udisks":
+        steps = [["udisksctl", "unmount", "-b", a.dev]]
+        if a.luks:
+            steps.append(["udisksctl", "lock", "-b", a.luks])
+        if a.removable and a.disk:
+            steps.append(["udisksctl", "power-off", "-b", a.disk])
+    elif a.mode == "loop":
+        steps = [["udisksctl", "unmount", "-b", a.dev], ["udisksctl", "loop-delete", "-b", a.disk]]
+    elif a.mode == "fuse":
+        steps = [["fusermount3", "-u", a.mount]]
+    elif a.mode == "gio":
+        steps = [["gio", "mount", "-u", a.mount]]
+    else:
+        done("error", "Can't unmount this drive without root")
+
+    for i, step in enumerate(steps):
+        code, out = run(step)
+        if step[0] == "fusermount3" and code != 0:
+            code, out = run(["fusermount", "-u", a.mount])
+        # Power-off is a courtesy: a failure there still left it unmounted.
+        if code != 0 and not (i > 0 and step[1] == "power-off"):
+            if "target is busy" in out or "busy" in out.lower():
+                notify("%s is busy" % a.name, out, urgent=True)
+                done("busy", out, procs=[])
+            notify("Could not eject %s" % a.name, out, urgent=True)
+            done("error", out)
+    if a.removable:
+        notify("Ejected %s" % a.name, "Safe to unplug.")
+    else:
+        notify("Unmounted %s" % a.name, a.mount)
+    done("ok")
+
+
+def mounted_at(out):
+    m = re.search(r" at (.+?)\.?$", out.strip())
+    return m.group(1) if m else ""
+
+
+def cmd_mount(a):
+    code, out = run(["udisksctl", "mount", "-b", a.dev])
+    if code != 0:
+        notify("Could not mount %s" % a.name, out, urgent=True)
+        done("error", out)
+    done("ok", out, mountpoint=mounted_at(out))
+
+
+def cmd_unlock(a):
+    # Interactive: udisksctl asks for the passphrase on this terminal.
+    print("Unlocking %s (%s)\n" % (a.name, a.dev), flush=True)
+    p = subprocess.run(["udisksctl", "unlock", "-b", a.dev], stdout=subprocess.PIPE, text=True)
+    sys.stdout.write(p.stdout)
+    if p.returncode != 0:
+        notify("Could not unlock %s" % a.name, urgent=True)
+        sys.exit(1)
+    # "Unlocked /dev/sdb1 as /dev/dm-3."
+    m = re.search(r" as (/dev/\S+?)\.?$", p.stdout.strip())
+    if not m:
+        sys.exit(0)
+    code, out = run(["udisksctl", "mount", "-b", m.group(1)])
+    print(out)
+    if code == 0:
+        notify("Unlocked %s" % a.name, mounted_at(out))
+    else:
+        notify("Unlocked %s, but mount failed" % a.name, out, urgent=True)
+    sys.exit(code)
+
+
+def cmd_lock(a):
+    if a.mount:
+        procs = busy_procs(a.mount)
+        if procs:
+            notify("%s is busy" % a.name, "In use by " + proc_list(procs), urgent=True)
+            done("busy", "in use by " + proc_list(procs), procs=procs)
+        code, out = run(["udisksctl", "unmount", "-b", a.dev])
+        if code != 0:
+            notify("Could not unmount %s" % a.name, out, urgent=True)
+            done("error", out)
+    code, out = run(["udisksctl", "lock", "-b", a.luks])
+    if code != 0:
+        notify("Could not lock %s" % a.name, out, urgent=True)
+        done("error", out)
+    notify("Locked %s" % a.name)
+    done("ok")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("action", choices=list(HANDLERS))
+    ap.add_argument("--mode", default="udisks")
+    ap.add_argument("--dev", default="")
+    ap.add_argument("--disk", default="")
+    ap.add_argument("--luks", default="")
+    ap.add_argument("--mount", default="")
+    ap.add_argument("--name", default="drive")
+    ap.add_argument("--removable", action="store_true")
+    ap.add_argument("--kill", action="store_true")
+    a = ap.parse_args()
+    HANDLERS[a.action](a)
+
+
+HANDLERS = {"eject": cmd_eject, "mount": cmd_mount, "unlock": cmd_unlock,
+            "lock": cmd_lock, "busy": cmd_busy}
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,46 @@
+[Unit]
+Description=Driveway cloud mount (%i)
+Documentation=https://github.com/gdeyoung/omarchy-driveway
+# No user-manager network-online.target (it is not a real gate in the user
+# manager); the restart loop below is what rides out a missing network.
+# Supervision model adapted from bmaltais/StartDrive + jonspinks/omarchy-rclone
+# (both MIT) — see NOTICE.md.
+PartOf=graphical-session.target
+# Never give up: an unreachable network must look "retrying", not dead.
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+Environment=RCLONE_CONFIG=%h/.config/rclone/rclone.conf
+# Per-drive settings: rclone reads RCLONE_* variables, so defaults can be
+# overridden later by ~/.config/driveway/<remote>.env without templating.
+Environment=RCLONE_VFS_CACHE_MAX_SIZE=4G
+Environment=RCLONE_VFS_CACHE_MAX_AGE=72h
+Environment=RCLONE_READ_ONLY=false
+Environment=RCLONE_LOW_LEVEL_RETRIES=3
+EnvironmentFile=-%h/.config/driveway/%i.env
+# Private 0700 runtime dir per mount for rclone's remote-control socket; the
+# panel reads transfer activity from it. A unix socket in a 0700 directory
+# needs no password and is reachable only by this user.
+RuntimeDirectory=driveway-cloud/%i
+RuntimeDirectoryMode=0700
+ExecStartPre=/usr/bin/mkdir -p -m 0700 %h/Cloud/%i %h/.cache/rclone
+ExecStart=/usr/bin/rclone mount %i: %h/Cloud/%i \
+  --vfs-cache-mode full \
+  --dir-cache-time 1h \
+  --poll-interval 15s \
+  --umask 077 \
+  --allow-other=false \
+  --rc --rc-addr=unix://%t/driveway-cloud/%i/rc.sock --rc-no-auth \
+  --log-level INFO
+ExecStop=/usr/bin/fusermount3 -uz %h/Cloud/%i
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=10
+UMask=0077
+# fusermount3 is setuid root, so NoNewPrivileges/RestrictSUIDSGID and mount
+# namespaces (PrivateTmp, ProtectSystem/Home, ...) would break the mount;
+# unprivileged FUSE is the security boundary here instead.
+
+[Install]
+WantedBy=graphical-session.target

@@ -148,7 +148,9 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(560))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(600))
+    // One source of truth: the scroller holds either tab content or a
+    // wizard; fittedContentHeight clamps to available screen space.
+    contentHeight: panel.fittedContentHeight(panelFlick.contentHeight, Style.space(760))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -170,7 +172,9 @@ Panel {
       id: panelFlick
       anchors.fill: parent
       contentWidth: width
-      contentHeight: column.implicitHeight
+      contentHeight: root.netWizardOpen || root.cloudWizardOpen
+        ? wizHost.implicitHeight
+        : column.implicitHeight
       clip: true
       boundsBehavior: Flickable.StopAtBounds
       flickableDirection: Flickable.VerticalFlick
@@ -179,6 +183,7 @@ Panel {
 
       Column {
         id: column
+        visible: !root.netWizardOpen && !root.cloudWizardOpen
         width: panelFlick.width
         spacing: Style.space(12)
 
@@ -515,30 +520,20 @@ Panel {
           }
         }
       }
-    }
 
-    // wizard overlays — replace tab content while open
-    Rectangle {
-      anchors.fill: parent
-      visible: root.netWizardOpen || root.cloudWizardOpen
-      radius: Style.cornerRadius
-      color: "transparent"
-
-      Flickable {
-        anchors.fill: parent
-        contentWidth: width
-        clip: true
-        boundsBehavior: Flickable.StopAtBounds
-        contentHeight: Math.max(height, root.netWizardOpen
-                                ? netWiz.contentHeight + Style.space(16)
-                                : cloudWiz.contentHeight + Style.space(16))
-        interactive: contentHeight > height
+      // wizards — inline as the scroller's content while open (tab column
+      // hides above); the panel grows to fit and nothing underdraws
+      Column {
+        id: wizHost
+        visible: root.netWizardOpen || root.cloudWizardOpen
+        width: panelFlick.width
+        spacing: Style.space(4)
 
         NetMapWizard {
           id: netWiz
           visible: root.netWizardOpen
           width: parent.width
-          height: Math.max(parent.height, contentHeight + Style.space(16))
+          height: contentHeight
           foreground: root.foreground
           urgent: root.urgent
           fontFamily: root.fontFamily
@@ -550,7 +545,7 @@ Panel {
           id: cloudWiz
           visible: root.cloudWizardOpen
           width: parent.width
-          height: Math.max(parent.height, contentHeight + Style.space(16))
+          height: contentHeight
           foreground: root.foreground
           urgent: root.urgent
           fontFamily: root.fontFamily

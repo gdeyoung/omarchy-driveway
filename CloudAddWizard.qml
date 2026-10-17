@@ -97,7 +97,7 @@ Rectangle {
           required property var modelData
           readonly property bool active: wiz.provider && wiz.provider.key === modelData.key
           Layout.fillWidth: true
-          height: Style.space(38)
+          implicitHeight: Style.space(40)
           radius: Style.cornerRadius
           color: active ? Qt.alpha(wiz.foreground, 0.16)
                         : (pm.containsMouse ? Qt.alpha(wiz.foreground, 0.10)

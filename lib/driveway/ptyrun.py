@@ -212,21 +212,26 @@ def run_expect(cmd: list[str],
             os.close(fd)
         except OSError:
             pass
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            pass
+        # done_pattern breaks may race the child's natural exit: closing the
+        # master can HUP it first (exit 129 instead of its real code). Wait
+        # briefly for a real exit before resorting to a kill.
+        deadline = time.monotonic() + 0.6
+        while time.monotonic() < deadline:
+            try:
+                waited, wstatus = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                wstatus = status if status is not None else 0
+                waited = pid
+            if waited == pid:
+                status = wstatus
+                break
+            time.sleep(0.02)
         else:
-            # collect if still running after loop broke on done_pattern
-            if status is None:
-                try:
-                    os.kill(pid, 15)
-                except ProcessLookupError:
-                    pass
-                try:
-                    _, status = os.waitpid(pid, 0)
-                except ChildProcessError:
-                    status = 0
+            try:
+                os.kill(pid, 15)
+                _, status = os.waitpid(pid, 0)
+            except (ProcessLookupError, ChildProcessError):
+                status = status if status is not None else 0
 
     if status is None:
         return bytes(out), 0

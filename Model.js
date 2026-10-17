@@ -130,6 +130,12 @@ function filterDrives(drives, query) {
 // Bar icon verdict: worst health wins (rclone-bs RANK idea, small scale).
 // Returns {urgent, dim, badge}: urgent = a cloud drive failed or a drive is
 // at/over fullPct; dim = nothing mounted at all; badge = mounted count.
+function netGlyph(scheme) {
+  var glyphs = { smb: "󰅹", sftp: "󰣀", ftp: "󰢑", nfs: "󰛧", dav: "󰕮",
+                 davs: "󰕮" }
+  return glyphs[scheme] || "󰲂"
+}
+
 function barState(drives, cloudDrives, cloudOk, fullPct) {
   var state = { urgent: false, dim: true, badge: 0 }
   var list = drives || []

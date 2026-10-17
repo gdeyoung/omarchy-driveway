@@ -1,0 +1,16 @@
+[Unit]
+Description=Driveway: gvfs fuse bridge (real paths for mapped network drives)
+# Arch's gvfs ships the gvfsd-fuse binary but no user unit (GNOME starts it
+# via XDG autostart, which Omarchy does not run). Without it, gio/gvfs
+# mounts have no filesystem path. We start it ourselves.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStartPre=/usr/bin/mkdir -p %t/gvfs
+ExecStart=/usr/lib/gvfsd-fuse -f %t/gvfs
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

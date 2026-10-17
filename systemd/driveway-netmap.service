@@ -1,0 +1,14 @@
+[Unit]
+Description=Driveway: remount saved network drives at login
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.config/omarchy/plugins/gdeyoung.driveway/bin/driveway netmap replay
+# per-map timeout lives in the replay engine; allow the whole replay to take a while
+TimeoutStartSec=300
+RemainAfterExit=yes
+
+[Install]
+WantedBy=graphical-session.target

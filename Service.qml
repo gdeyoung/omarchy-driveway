@@ -23,6 +23,23 @@ Item {
   property var busy: ({})          // drive.key -> {message, procs, uploads}
   property string lastError: ""
 
+  // ---- network mapping (v0.2) ------------------------------------------------
+  property var netServers: []      // avahi discovery rows
+  property var netShares: []       // shares of the browsed server
+  property string netSharesServer: ""
+  property var netMaps: []         // saved maps
+  property var netMounted: []      // currently mounted gvfs network locations
+  property bool netDiscovering: false
+  property bool netListingShares: false
+  property bool netMounting: false
+  property string netError: ""
+  // cloud add wizard: state idle -> picking -> working -> done/error
+  property var cloudWizard: ({ state: "idle", provider: "", label: "" })
+
+  // emitted when a browsed server refuses guest listing: the wizard should
+  // surface credential fields for that server
+  signal netNeedsCreds(string server)
+
   readonly property int pollMs: Math.max(2, Number(setting("pollIntervalSec", 10)) || 10) * 1000
   readonly property bool showNetwork: setting("showNetwork", true) !== false
   readonly property bool showUnmounted: setting("showUnmounted", true) !== false
@@ -63,6 +80,7 @@ Item {
   function refresh() {
     refreshList()
     refreshCloud()
+    refreshNetwork()
   }
 
   function refreshList() {
@@ -231,6 +249,106 @@ Item {
     })
   }
 
+  // ---- network mapping -------------------------------------------------------
+
+  function refreshNetwork() {
+    run([script("driveway"), "netmap", "list"], function(result) {
+      root.netMaps = result.maps || []
+      root.netMounted = result.mounted || []
+    }, true)
+  }
+
+  function netDiscover() {
+    netDiscovering = true
+    netError = ""
+    run([script("driveway"), "netmap", "discover"], function(result) {
+      netDiscovering = false
+      netServers = result.servers || []
+    }, true)
+  }
+
+  function netBrowseShares(server, user, domain, password) {
+    netListingShares = true
+    netSharesServer = server
+    netError = ""
+    runWithStdin([script("driveway"), "netmap", "shares", server],
+                 JSON.stringify({ user: user || null, domain: domain || null,
+                                  password: password || null }),
+                 function(result) {
+      netListingShares = false
+      if (result.needs_creds) {
+        netError = "server requires a login"
+        netShares = []
+        root.netNeedsCreds(server)
+      } else {
+        netShares = result.shares || []
+      }
+    }, true)
+  }
+
+  // spec carries credentials; it goes over stdin, never argv (house rule)
+  function netMap(spec, onDone) {
+    netMounting = true
+    netError = ""
+    runWithStdin([script("driveway"), "netmap", "mount"],
+                 JSON.stringify(spec),
+                 function(result) {
+      netMounting = false
+      if (!result.ok) netError = result.error || "mount failed"
+      if (onDone) onDone(result)
+      if (result.ok) run(["xdg-open", result.mounted_path || ""])
+    }, true, 120000)
+  }
+
+  function netUnmount(url) {
+    run([script("driveway"), "netmap", "unmount", url], function(result) {
+      if (!result.ok) netError = result.error || "unmount failed"
+    })
+  }
+
+  function netForget(id) {
+    run([script("driveway"), "netmap", "forget", id], function() {})
+  }
+
+  // ---- cloud add wizard ------------------------------------------------------
+
+  function cloudWizardStart(providerKey, label) {
+    cloudWizard = { state: "picking", provider: providerKey, label: label }
+  }
+
+  function cloudWizardCancel() {
+    cloudWizard = { state: "idle", provider: "", label: "" }
+  }
+
+  // OAuth providers: browser opens; process waits for sign-in (up to 5 min).
+  // Non-OAuth (nextcloud/webdav/sftp/ftp): direct add with credentials.
+  function cloudWizardAdd(name, extras) {
+    var oauth = ["gdrive", "onedrive", "dropbox"].indexOf(cloudWizard.provider) >= 0
+    var cmd = oauth
+      ? [script("driveway"), "cloud", "add-oauth", name, cloudWizard.provider]
+      : [script("driveway"), "cloud", "add", name, cloudWizard.provider]
+    cloudWizard = Object.assign({}, cloudWizard, {
+      state: "working", phase: oauth ? "waiting for browser sign-in…" : "adding…",
+      error: "" })
+    runWithStdin(cmd, JSON.stringify(extras || {}), function(result) {
+      if (result.ok) {
+        cloudWizard = Object.assign({}, cloudWizard, { state: "done" })
+        refreshCloud()
+      } else {
+        cloudWizard = Object.assign({}, cloudWizard, {
+          state: "error", error: result.error || "add failed" })
+      }
+    }, true, 330000)
+  }
+
+  function cloudRemove(name) {
+    run([script("driveway"), "cloud", "remove", name], function(result) {
+      if (!result.ok) root.lastError = result.error || "remove failed"
+      refreshCloud()
+    })
+  }
+
+
   function cloudUnmount(name) {
     run([script("driveway"), "cloud", "unmount", name], function(result) {
       if (!result.ok) root.lastError = result.message || "unmount failed"
@@ -243,15 +361,29 @@ Item {
   }
 
   // Short-lived process; `done(result)` gets the JSON line the CLI prints.
-  function run(cmd, done) {
-    var p = actionProcess.createObject(root, { command: cmd, done: done || null })
+  // quiet=true: don't trigger the full refresh on exit (caller refreshes).
+  function run(cmd, done, quiet) {
+    var p = actionProcess.createObject(root, { command: cmd, done: done || null,
+                                                quiet: !!quiet })
     p.running = true
+  }
+
+  // Same, but writes one JSON line to the child's stdin after start —
+  // the secret-carrying channel (never argv). stdinEnabled is required
+  // for Process.write() per Quickshell's Io API.
+  function runWithStdin(cmd, stdinLine, done, quiet, timeoutMs) {
+    var p = stdinProcess.createObject(root, { command: cmd, done: done || null,
+                                              quiet: !!quiet,
+                                              stdinLine: stdinLine,
+                                              deadline: timeoutMs || 30000 })
+    p.startWizardStep()
   }
 
   Component {
     id: actionProcess
     Process {
       property var done: null
+      property bool quiet: false
       stdout: StdioCollector { id: out }
       onExited: {
         if (done) {
@@ -259,8 +391,52 @@ Item {
           try { result = JSON.parse(out.text.trim().split("\n").pop()) } catch (e) {}
           done(result)
         }
-        root.refresh()
+        if (!quiet) root.refresh()
         destroy()
+      }
+    }
+  }
+
+  Component {
+    id: stdinProcess
+    // Process is a QProcess: it takes no QML children, so the watchdog
+    // Timer lives beside it under an Item wrapper.
+    Item {
+      id: step
+      property var command: []
+      property var done: null
+      property bool quiet: false
+      property string stdinLine: ""
+      property real deadline: 30000
+
+      function startWizardStep() { proc.running = true }
+
+      width: 0; height: 0
+
+      Process {
+        id: proc
+        command: step.command
+        stdinEnabled: true
+        stdout: StdioCollector { id: sout }
+        onStarted: write(step.stdinLine + "\n")
+        onExited: function(exitCode, exitStatus) {
+          if (step.done) {
+            var result = { ok: false, error: "no output" }
+            try { result = JSON.parse(sout.text.trim().split("\n").pop()) } catch (e) {}
+            step.done(result)
+          }
+          if (!step.quiet) root.refresh()
+          step.destroy()
+        }
+      }
+
+      Timer {
+        interval: step.deadline
+        running: proc.running
+        onTriggered: {
+          console.warn("gdeyoung.driveway: wizard step timed out")
+          proc.running = false
+        }
       }
     }
   }

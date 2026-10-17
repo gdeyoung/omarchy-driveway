@@ -16,10 +16,17 @@ One bar icon opens a tabbed panel:
   anything rclone speaks) on supervised systemd user units: mount/unmount,
   health states (`Mounted`, `Starting…`, `Stopped`, `Failed · retrying`,
   `Mounted (no unit)`), usage bars, pending-upload counts. The restart loop
-  rides out dead networks; each mount gets a private 0700 rc socket. Add
-  remotes via `rclone config` in a floating terminal.
+  rides out dead networks; each mount gets a private 0700 rc socket. **Add
+  cloud drive** runs the whole sign-in in the panel: Google/OneDrive/Dropbox
+  OAuth opens your browser (`rclone authorize`, token captured over a pty,
+  never logged, never in argv); Nextcloud/WebDAV/SFTP/FTP take a URL + login.
 - **Network** — live SMB/NFS/sshfs/WebDAV mounts with open/terminal/unmount.
-  Persistent share creation (encrypted credentials, boot mounts) lands in v0.2.
+  **Map network drive** opens an in-panel wizard: browse the LAN (Avahi lists
+  SMB/SSH/FTP servers, smbclient lists shares) or paste any
+  `smb:// sftp:// ftp:// nfs:// dav://` address, with optional credentials.
+  Mapped drives remount at login (`driveway-netmap.service`); credentials are
+  stored encrypted (`systemd-creds --user`, 0600) and only ever cross a pipe,
+  never argv. Guest mounts need no credentials.
 
 ## Requirements
 

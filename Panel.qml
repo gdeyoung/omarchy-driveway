@@ -23,6 +23,8 @@ Panel {
   property string query: ""
   property bool searchFocus: false
   property var infoOpen: ({})   // drive.key -> true
+  property bool netWizardOpen: false
+  property bool cloudWizardOpen: false
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
@@ -350,19 +352,19 @@ Panel {
             implicitHeight: addLabel.implicitHeight + Style.space(16)
 
             MouseArea {
-              anchors.fill: parent
-              hoverEnabled: true
-              cursorShape: Qt.PointingHandCursor
-              onClicked: drv.addCloudRemote()
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.cloudWizardOpen = true
             }
 
             Text {
-              id: addLabel
-              anchors.centerIn: parent
-              text: "󰐗  Add cloud drive (rclone config)"
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
+            id: addLabel
+            anchors.centerIn: parent
+            text: "󰐗  Add cloud drive"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
             }
           }
         }
@@ -374,7 +376,11 @@ Panel {
           spacing: Style.space(10)
 
           Repeater {
-            model: drv.networkDrives
+            // lister covers kernel cifs/nfs/sshfs; gvfs rows come from
+            // netMounted below — one row per drive, no duplicates
+            model: drv.networkDrives.filter(function(d) {
+              return !d.mountpoint || d.mountpoint.indexOf("/gvfs/") < 0
+            })
             DriveRow {
               required property var modelData
               width: parent.width
@@ -395,7 +401,7 @@ Panel {
           }
 
           Text {
-            visible: drv.networkDrives.length === 0
+            visible: drv.networkDrives.length === 0 && drv.netMounted.length === 0
             width: parent.width
             text: "No network shares mounted."
             color: root.dim
@@ -404,12 +410,74 @@ Panel {
             horizontalAlignment: Text.AlignHCenter
           }
 
+          Repeater {
+            model: drv.netMounted
+            NetMapRow {
+              required property var modelData
+              width: parent.width
+              label: modelData.label
+              sublabel: modelData.scheme.toUpperCase() + " · mapped · remounts at login"
+              glyph: Model.netGlyph(modelData.scheme)
+              mounted: true
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onOpenRequested: drv.run(["xdg-open", modelData.path])
+              onUnmountRequested: drv.netUnmount(modelData.url)
+            }
+          }
+
+          Repeater {
+            model: drv.netMaps.filter(function(m) {
+              return !drv.netMounted.some(function(x) { return x.url === m.url })
+            })
+            NetMapRow {
+              required property var modelData
+              width: parent.width
+              label: modelData.label
+              sublabel: modelData.scheme.toUpperCase() + " · saved map · not mounted"
+              glyph: Model.netGlyph(modelData.scheme)
+              mounted: false
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onMountRequested: drv.netMap({ scheme: modelData.scheme,
+                                             server: modelData.server,
+                                             share: modelData.share,
+                                             port: modelData.port,
+                                             path: modelData.path, save: true })
+              onForgetRequested: drv.netForget(modelData.id)
+            }
+          }
+
+          CursorSurface {
+            width: parent.width
+            foreground: root.foreground
+            fill: Qt.rgba(1, 1, 1, 0.04)
+            radius: Style.cornerRadius
+            implicitHeight: mapDriveLabel.implicitHeight + Style.space(16)
+
+            MouseArea {
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: { root.netWizardOpen = true; netWiz.open() }
+            }
+
+            Text {
+              id: mapDriveLabel
+              anchors.centerIn: parent
+              text: "󰅮  Map network drive"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+            }
+          }
+
           Text {
             width: parent.width
             visible: true
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
-            text: "This tab lists live SMB/NFS/sshfs mounts. Persistent share creation (encrypted credentials, boot mounts) arrives in v0.2."
+            text: "Browse the LAN (Samba, SSH, FTP, NFS, WebDAV) or paste an address. Mapped drives remount at login; credentials are stored encrypted."
             color: Qt.darker(root.dim, 1.2)
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -418,9 +486,135 @@ Panel {
         }
       }
     }
+
+    // wizard overlays — replace tab content while open
+    Rectangle {
+      anchors.fill: parent
+      visible: root.netWizardOpen || root.cloudWizardOpen
+      radius: Style.cornerRadius
+      color: "transparent"
+
+      Flickable {
+        anchors.fill: parent
+        contentWidth: width
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        contentHeight: Math.max(height, root.netWizardOpen
+                                ? netWiz.contentHeight + Style.space(16)
+                                : cloudWiz.contentHeight + Style.space(16))
+        interactive: contentHeight > height
+
+        NetMapWizard {
+          id: netWiz
+          visible: root.netWizardOpen
+          width: parent.width
+          height: Math.max(parent.height, contentHeight + Style.space(16))
+          foreground: root.foreground
+          urgent: root.urgent
+          fontFamily: root.fontFamily
+          service: drv
+          onClosed: root.netWizardOpen = false
+        }
+
+        CloudAddWizard {
+          id: cloudWiz
+          visible: root.cloudWizardOpen
+          width: parent.width
+          height: Math.max(parent.height, contentHeight + Style.space(16))
+          foreground: root.foreground
+          urgent: root.urgent
+          fontFamily: root.fontFamily
+          service: drv
+          onClosed: root.cloudWizardOpen = false
+        }
+      }
+    }
+  }
+
+  Connections {
+    target: drv
+    function onNetNeedsCreds(server) {
+      root.netWizardOpen = true
+      netWiz.openCredsFor(server)
+    }
   }
 
   // ================= components ============================================
+
+  component NetMapRow: CursorSurface {
+    id: nrow
+    property string label: ""
+    property string sublabel: ""
+    property string glyph: "󰲂"
+    property bool mounted: false
+    property color foreground: Color.foreground
+    property string fontFamily: Style.font.family
+    signal openRequested()
+    signal unmountRequested()
+    signal mountRequested()
+    signal forgetRequested()
+
+    readonly property color dim: Qt.darker(foreground, 1.55)
+
+    fill: Qt.rgba(1, 1, 1, 0.04)
+    radius: Style.cornerRadius
+    implicitHeight: Style.space(44)
+
+    Row {
+      anchors.fill: parent
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(6)
+      spacing: Style.space(10)
+
+      Text {
+        text: nrow.glyph
+        color: nrow.mounted ? nrow.foreground : nrow.dim
+        font.family: nrow.fontFamily
+        font.pixelSize: Style.font.heading
+        anchors.verticalCenter: parent.verticalCenter
+      }
+
+      Column {
+        width: parent.width - Style.space(50) - actionsN.implicitWidth
+        anchors.verticalCenter: parent.verticalCenter
+        spacing: Style.space(2)
+        Text {
+          width: parent.width
+          text: nrow.label
+          color: nrow.foreground
+          font.family: nrow.fontFamily
+          font.pixelSize: Style.font.body
+          elide: Text.ElideRight
+        }
+        Text {
+          width: parent.width
+          text: nrow.sublabel
+          color: nrow.dim
+          font.family: nrow.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+      }
+
+      Row {
+        id: actionsN
+        spacing: Style.space(2)
+        anchors.verticalCenter: parent.verticalCenter
+        RowButton { glyph: "󰝰"; visible: nrow.mounted
+                    foreground: nrow.foreground; fontFamily: nrow.fontFamily
+                    tooltip: "Open in files"; onActivated: nrow.openRequested() }
+        RowButton { glyph: "󰕁"; visible: !nrow.mounted
+                    foreground: nrow.foreground; fontFamily: nrow.fontFamily
+                    tooltip: "Mount now"; onActivated: nrow.mountRequested() }
+        RowButton { glyph: "󰗞"; visible: nrow.mounted
+                    foreground: nrow.foreground; fontFamily: nrow.fontFamily
+                    tooltip: "Unmount"; onActivated: nrow.unmountRequested() }
+        RowButton { glyph: "󰆑"; visible: !nrow.mounted
+                    foreground: nrow.dim; fontFamily: nrow.fontFamily
+                    tooltip: "Forget this map"; onActivated: nrow.forgetRequested() }
+      }
+    }
+  }
 
   component TabButton: Rectangle {
     id: tb

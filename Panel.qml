@@ -296,31 +296,53 @@ Panel {
           width: parent.width
           spacing: Style.space(10)
 
-          CursorSurface {
+          Column {
             visible: !drv.cloud.rclone
             width: parent.width
-            foreground: root.foreground
-            fill: Qt.rgba(1, 1, 1, 0.05)
-            radius: Style.cornerRadius
-            implicitHeight: hint.implicitHeight + Style.space(20)
-
-            MouseArea {
-              anchors.fill: parent
-              hoverEnabled: true
-              cursorShape: Qt.PointingHandCursor
-              onClicked: drv.installRclone()
-            }
+            spacing: Style.space(8)
 
             Text {
-              id: hint
-              anchors.centerIn: parent
-              width: parent.width - Style.space(24)
-              textFormat: Text.PlainText
-              wrapMode: Text.WordWrap
-              text: "rclone is not installed — click here to install it.\nA terminal opens with:  sudo pacman -S --needed rclone gvfs-nfs\nType your password; the Cloud tab lights up when it finishes."
+              width: parent.width
+              text: "rclone is not installed — cloud drives need it (and NFS mounts use it too)."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+              horizontalAlignment: Text.AlignHCenter
+            }
+
+            CursorSurface {
+              width: parent.width
+              foreground: root.foreground
+              bordered: true
+              radius: Style.cornerRadius
+              implicitHeight: installLabel.implicitHeight + Style.space(18)
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: drv.installRclone()
+              }
+
+              Text {
+                id: installLabel
+                anchors.centerIn: parent
+                text: "󰑖  Install rclone now"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.bold: true
+                font.pixelSize: Style.font.body
+              }
+            }
+
+            Text {
+              width: parent.width
+              text: "A terminal opens and asks for your sudo password:\npacman -S --needed rclone gvfs-nfs"
+              color: Qt.darker(root.dim, 1.2)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              textFormat: Text.PlainText
               horizontalAlignment: Text.AlignHCenter
             }
           }

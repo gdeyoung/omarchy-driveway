@@ -31,7 +31,6 @@ CursorSurface {
         .filter(function(s) { return !!s }).join(" · ")
     : ""
 
-  foreground: row.foreground
   fill: Qt.rgba(1, 1, 1, 0.04)
   radius: Style.cornerRadius
   implicitHeight: content.implicitHeight + Style.space(16)

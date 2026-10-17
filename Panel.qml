@@ -469,7 +469,6 @@ Panel {
     readonly property bool full: mounted && remote.size > 0 && remote.pct >= fullWarnPct
     readonly property string chip: remote ? Model.cloudStateLabel(remote.state) : ""
 
-    foreground: crow.foreground
     fill: Qt.rgba(1, 1, 1, 0.04)
     radius: Style.cornerRadius
     implicitHeight: content.implicitHeight + Style.space(16)

@@ -296,12 +296,20 @@ Panel {
           width: parent.width
           spacing: Style.space(10)
 
-          Rectangle {
+          CursorSurface {
             visible: !drv.cloud.rclone
             width: parent.width
-            height: hint.height + Style.space(20)
+            foreground: root.foreground
+            fill: Qt.rgba(1, 1, 1, 0.05)
             radius: Style.cornerRadius
-            color: Qt.rgba(1, 1, 1, 0.05)
+            implicitHeight: hint.implicitHeight + Style.space(20)
+
+            MouseArea {
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: drv.installRclone()
+            }
 
             Text {
               id: hint
@@ -309,7 +317,7 @@ Panel {
               width: parent.width - Style.space(24)
               textFormat: Text.PlainText
               wrapMode: Text.WordWrap
-              text: "rclone is not installed. Cloud drives need it:\n  sudo pacman -S rclone\nthen add a remote with the button below."
+              text: "rclone is not installed — click here to install it.\nA terminal opens with:  sudo pacman -S --needed rclone gvfs-nfs\nType your password; the Cloud tab lights up when it finishes."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption

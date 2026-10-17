@@ -249,6 +249,14 @@ Item {
     })
   }
 
+  // One-click rclone install: floating terminal with the sudo command
+  // pre-loaded (same pattern as LUKS unlock — password typing stays in a
+  // real terminal, never in the shell). Panel polls rclone state after.
+  function installRclone() {
+    run(["omarchy-launch-floating-terminal-with-presentation",
+         "sudo pacman -S --needed rclone gvfs-nfs"])
+  }
+
   // ---- network mapping -------------------------------------------------------
 
   function refreshNetwork() {

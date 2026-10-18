@@ -1,5 +1,7 @@
 import QtQuick
 import QtQuick.Controls
+import qs.Commons
+import qs.Ui
 
 // Disk-cache limits: one global default + per-remote overrides.  Inline view
 // (replaces tab content, same contract as the wizards: height = contentHeight,

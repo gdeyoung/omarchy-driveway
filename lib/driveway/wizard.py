@@ -53,6 +53,27 @@ def providers() -> list[dict]:
 
 # ---------------------------------------------------------------- oauth
 
+def _debug_log(txt: str, code, note: str = "") -> None:
+    """Redacted capture of what authorize actually saw, for field debugging.
+    Token JSON is masked — secrets never land in this log."""
+    try:
+        redacted = re.sub(r"(\{\\?\"access_token.*?)\}(?=\s*<-{2,4}|\s*$)",
+                          "{TOKEN_REDACTED}", txt, flags=re.S)
+        redacted = re.sub(r"refresh_token=+[^\s&\"]+", "refresh_token=REDACTED",
+                          redacted)
+        path = Path(os.environ.get("DRIVEWAY_CONFIG_DIR",
+                                   Path.home() / ".config/driveway"))
+        path.mkdir(parents=True, exist_ok=True)
+        f = path / "authorize-debug.log"
+        import time
+        with open(f, "a") as fh:
+            fh.write("=== %s code=%s %s\n%s\n" % (time.strftime("%H:%M:%S"),
+                                                  code, note, redacted[:4000]))
+        os.chmod(f, 0o600)
+    except OSError:
+        pass
+
+
 def authorize_oauth(rtype: str, timeout: float = 300.0) -> dict:
     """Run `rclone authorize <rtype>` and capture the token JSON.
 
@@ -73,13 +94,16 @@ def authorize_oauth(rtype: str, timeout: float = 300.0) -> dict:
         done_pattern=r"(<-{2,4}|Failed|[Ee]rror)")
     txt = out.decode("utf-8", "replace")
     if "command not found" in txt or "rclone: command" in txt:
+        _debug_log(txt, code, "not-installed")
         raise WizardError("rclone is not installed")
     m = re.search(r"-{2,4}>\s*(\{.*?\})\s*<-{2,4}", txt, re.S)
     if not m:
         m = re.search(r"(\{\"access_token\".*?\})", txt, re.S)
     if not m:
+        _debug_log(txt, code, "no-token len=%d" % len(txt))
         tail = txt.strip().splitlines()[-1] if txt.strip() else f"exit {code}"
         raise WizardError(f"authorization did not complete: {tail[:200]}")
+    _debug_log(txt, code, "ok len=%d" % len(txt))
     return {"token": m.group(1)}
 
 

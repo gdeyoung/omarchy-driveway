@@ -462,3 +462,142 @@ def reconnect(name):
     return {"ok": ok,
             "message": "reauthorized" if ok else txt.strip().splitlines()[-1][:200]
             if txt.strip() else "exit %s" % code}
+
+
+# ---------------------------------------------------------------- cache caps
+# VFS disk-cache limits: global default + per-remote override.  Values ride
+# EnvironmentFiles the unit template already reads (RCLONE_* env is rclone's
+# own config surface — verified live via the rc socket: CacheMaxSize follows
+# RCLONE_VFS_CACHE_MAX_SIZE).  Later EnvironmentFile lines override earlier
+# Environment= directives, so precedence = template fallback < global < remote.
+
+ENV_FILE_MODE = 0o600
+
+
+def _state_dir() -> Path:
+    """Resolved per call so tests (and exotic envs) never share one binding."""
+    return Path(os.environ.get("DRIVEWAY_CONFIG_DIR",
+                               os.path.expanduser("~/.config/driveway")))
+TEMPLATE_CACHE_DEFAULT = "10G"
+_SIZE_RE = None  # compiled lazily to keep import cost trivial
+
+
+def _size_re():
+    global _SIZE_RE
+    import re
+    if _SIZE_RE is None:
+        _SIZE_RE = re.compile(
+            r"^\d+(\.\d+)?([kKmMgGtTpP]|[kKmMgGtTpP][iI]|[bB])?$")
+    return _SIZE_RE
+
+
+def normalize_size(size: str):
+    """'off'/'unlimited' -> '0' (rclone: 0 = no cap). Returns None if invalid."""
+    s = (size or "").strip()
+    if s.lower() in ("off", "unlimited", "none"):
+        return "0"
+    if _size_re().match(s):
+        return s
+    return None
+
+
+def _settings_load() -> dict:
+    try:
+        with open(_settings_file()) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _settings_save(data: dict) -> None:
+    sd = _state_dir()
+    sd.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(sd), prefix=".settings-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.chmod(tmp, ENV_FILE_MODE)
+        os.replace(tmp, _settings_file())
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def _write_env_file(path: Path, var: str, value: str | None) -> bool:
+    """Write/remove one RCLONE_*= line file. Returns True if disk changed."""
+    if value is None:
+        return path.exists() and (path.unlink() or True)
+    line = "%s=%s\n" % (var, value)
+    if path.is_file() and path.read_text() == line:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(line)
+    os.chmod(path, ENV_FILE_MODE)
+    return True
+
+
+def _cloud_defaults_env() -> Path:
+    return _state_dir() / "cloud-defaults.env"
+
+
+def _remote_env(name: str) -> Path:
+    return _state_dir() / ("%s.env" % name)
+
+
+def _settings_file() -> Path:
+    return _state_dir() / "settings.json"
+
+
+def cache_get() -> dict:
+    """Effective cache limits for panel display."""
+    data = _settings_load()
+    gmax = data.get("vfsCacheMax")
+    overrides = data.get("remotes") or {}
+    out = {"global": gmax or TEMPLATE_CACHE_DEFAULT,
+           "globalIsCustom": bool(gmax),
+           "remotes": {}}
+    for r in remotes():
+        name = r["name"]
+        ov = overrides.get(name, {}).get("vfsCacheMax")
+        out["remotes"][name] = {
+            "limit": ov or out["global"],
+            "isOverride": bool(ov),
+        }
+    return out
+
+
+def cache_set(target: str, size: str) -> dict:
+    """target='global' or a remote name. size: SizeSuffix or 'off'.
+    Writes settings.json + the env file, restarts affected mounts."""
+    val = normalize_size(size)
+    if val is None:
+        return {"ok": False, "error": "invalid size %r (use e.g. 10G, 500M, off)" % size}
+    data = _settings_load()
+    changed_units = []
+    if target == "global":
+        data["vfsCacheMax"] = val
+        _settings_save(data)
+        _write_env_file(_cloud_defaults_env(), "RCLONE_VFS_CACHE_MAX_SIZE", val)
+        # every mount picks the new default up on restart
+        for r in remotes():
+            if unit_state(r["name"]) is not None:
+                changed_units.append(r["name"])
+    else:
+        if not any(r["name"] == target for r in remotes()):
+            return {"ok": False, "error": "unknown remote %r" % target}
+        rem = data.setdefault("remotes", {})
+        if val == "0" or val == (data.get("vfsCacheMax") or TEMPLATE_CACHE_DEFAULT):
+            rem.pop(target, None)           # revert to global: no override file
+            _write_env_file(_remote_env(target), "RCLONE_VFS_CACHE_MAX_SIZE", None)
+        else:
+            rem.setdefault(target, {})["vfsCacheMax"] = val
+            _write_env_file(_remote_env(target), "RCLONE_VFS_CACHE_MAX_SIZE", val)
+        _settings_save(data)
+        if unit_state(target) is not None:
+            changed_units.append(target)
+    for name in changed_units:
+        _run(["systemctl", "--user", "restart", "driveway-cloud@%s" % name],
+             timeout=45)
+    return {"ok": True, "restarted": changed_units,
+            "effective": cache_get()}

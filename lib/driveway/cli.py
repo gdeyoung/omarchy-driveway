@@ -96,6 +96,12 @@ def cmd_cloud(args):
         print(json.dumps(cloud.diagnose(args.remote)))
     elif args.cloud_cmd == "restart":
         print(json.dumps(cloud.remedy_restart(args.remote)))
+    elif args.cloud_cmd == "cache-get":
+        print(json.dumps(cloud.cache_get()))
+        return
+    elif args.cloud_cmd == "cache-set":
+        print(json.dumps(cloud.cache_set(args.target, args.size)))
+        return
     elif args.cloud_cmd == "reconnect":
         # long-running: opens the browser; token lands in rclone.conf
         print(json.dumps(cloud.reconnect(args.remote)))
@@ -207,6 +213,10 @@ def build_parser():
     pdg.add_argument("remote")
     prs = sub2.add_parser("restart")
     prs.add_argument("remote")
+    sub2.add_parser("cache-get")
+    pcs = sub2.add_parser("cache-set")
+    pcs.add_argument("target", help="'global' or remote name")
+    pcs.add_argument("size", help="SizeSuffix like 10G, 500M, or 'off'")
     prc = sub2.add_parser("reconnect")
     prc.add_argument("remote")
 

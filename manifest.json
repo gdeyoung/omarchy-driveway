@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "gdeyoung.driveway",
   "name": "Driveway",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": "Greg DeYoung",
   "license": "MIT",
   "description": "Every drive in one place: thumb drives, disks, SD cards, network shares and rclone cloud drives \u2014 mounted, browsed, opened and ejected from a tabbed bar panel. Cloud remotes ride supervised systemd units with health states and pending-upload awareness.",

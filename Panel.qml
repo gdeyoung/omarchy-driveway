@@ -25,6 +25,7 @@ Panel {
   property var infoOpen: ({})   // drive.key -> true
   property bool netWizardOpen: false
   property bool cloudWizardOpen: false
+  property bool cacheOpen: false
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
@@ -172,7 +173,7 @@ Panel {
       id: panelFlick
       anchors.fill: parent
       contentWidth: width
-      contentHeight: root.netWizardOpen || root.cloudWizardOpen
+      contentHeight: root.netWizardOpen || root.cloudWizardOpen || root.cacheOpen
         ? wizHost.implicitHeight
         : column.implicitHeight
       clip: true
@@ -183,7 +184,7 @@ Panel {
 
       Column {
         id: column
-        visible: !root.netWizardOpen && !root.cloudWizardOpen
+        visible: !root.netWizardOpen && !root.cloudWizardOpen && !root.cacheOpen
         width: panelFlick.width
         spacing: Style.space(12)
 
@@ -442,6 +443,32 @@ Panel {
           CursorSurface {
             width: parent.width
             foreground: root.foreground
+            bordered: true
+            radius: Style.cornerRadius
+            implicitHeight: cacheBtnLabel.implicitHeight + Style.space(12)
+
+            MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: { drv.loadCloudCache(); root.cacheOpen = true }
+            }
+
+            Text {
+            id: cacheBtnLabel
+            anchors.centerIn: parent
+            text: drv.cloudCache && drv.cloudCache.global
+              ? "󰊚  Disk cache — " + drv.cloudCache.global
+              : "󰊚  Disk cache limits"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            }
+          }
+
+          CursorSurface {
+            width: parent.width
+            foreground: root.foreground
             fill: Qt.rgba(1, 1, 1, 0.04)
             radius: Style.cornerRadius
             implicitHeight: addLabel.implicitHeight + Style.space(16)
@@ -585,7 +612,7 @@ Panel {
       // hides above); the panel grows to fit and nothing underdraws
       Column {
         id: wizHost
-        visible: root.netWizardOpen || root.cloudWizardOpen
+        visible: root.netWizardOpen || root.cloudWizardOpen || root.cacheOpen
         width: panelFlick.width
         spacing: Style.space(4)
 
@@ -599,6 +626,18 @@ Panel {
           fontFamily: root.fontFamily
           service: drv
           onClosed: root.netWizardOpen = false
+        }
+
+        CacheSettings {
+          id: cacheSet
+          visible: root.cacheOpen
+          width: parent.width
+          height: cacheSet.implicitHeight
+          foreground: root.foreground
+          urgent: root.urgent
+          fontFamily: root.fontFamily
+          service: drv
+          onClosed: root.cacheOpen = false
         }
 
         CloudAddWizard {

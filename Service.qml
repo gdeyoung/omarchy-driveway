@@ -21,6 +21,8 @@ Item {
   property var drives: []          // lister rows (incl. the System row)
   property var cloud: ({ rclone: false, unit: false, mountRoot: "", drives: [] })
   property var cloudDiag: ({})        // name -> {state, problem, remedy}
+  property var cloudCache: ({})       // cache-get: global + per-remote limits
+  property string cloudCacheBusy: ""  // target with a save in flight
   property var cloudProviders: []     // from `cloud providers` once at start
   property var busy: ({})          // drive.key -> {message, procs, uploads}
   property string lastError: ""
@@ -84,6 +86,7 @@ Item {
     refreshCloud()
     refreshNetwork()
     loadProviders()
+    loadCloudCache()
   }
 
   function refreshList() {
@@ -309,6 +312,25 @@ Item {
   function cloudUnmountAll() {
     run([script("driveway"), "cloud", "unmount-all"], function(result) {
       if (!result.ok) root.lastError = result.message || "unmount-all failed"
+      refreshCloud()
+    })
+  }
+
+  function loadCloudCache() {
+    run([script("driveway"), "cloud", "cache-get"], function(result) {
+      if (result && result.remotes !== undefined) root.cloudCache = result
+    })
+  }
+
+  function cloudCacheSet(target, size) {
+    root.cloudCacheBusy = target
+    run([script("driveway"), "cloud", "cache-set", target, size],
+        function(result) {
+      root.cloudCacheBusy = ""
+      if (!result || !result.ok)
+        root.lastError = (result && (result.error || result.message))
+                         || "cache set failed"
+      loadCloudCache()
       refreshCloud()
     })
   }

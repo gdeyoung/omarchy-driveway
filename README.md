@@ -60,9 +60,28 @@ Every external command, for the security reviewer:
 | `xdg-open`, `foot --working-directory` | open in file manager / terminal |
 | `omarchy-launch-floating-terminal-with-presentation` | LUKS unlock + `rclone config` |
 | `notify-send -a Driveway` | action outcomes |
+| `systemctl --user restart driveway-cloud@<name>` | apply cache-limit changes |
 
 No secrets are stored by the plugin: credentials live in rclone's own config;
 LUKS passphrases are typed straight into udisksctl's terminal prompt.
+
+## Disk cache limits
+
+Cached cloud files live in `~/.cache/rclone` (VFS cache, mode `full`).
+A **global default** (10G) and **per-drive overrides** are editable from the
+panel's Cloud tab (Disk cache button) and the CLI:
+
+```
+driveway cloud cache-get
+driveway cloud cache-set global 10G
+driveway cloud cache-set gdrive-gdeyoung 25G   # per-drive override
+driveway cloud cache-set gdrive-gdeyoung off   # remove cap (not recommended)
+```
+
+Values are `SizeSuffix` (`500M`, `10G`, `1.5T`) or `off`. They ride
+`EnvironmentFile`s (`~/.config/driveway/cloud-defaults.env`,
+`~/.config/driveway/<remote>.env`) that the unit template reads; changing one
+restarts the affected mount automatically.
 
 ## Settings (bar widget settings)
 

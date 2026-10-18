@@ -14,10 +14,11 @@ Type=notify
 Environment=RCLONE_CONFIG=%h/.config/rclone/rclone.conf
 # Per-drive settings: rclone reads RCLONE_* variables, so defaults can be
 # overridden later by ~/.config/driveway/<remote>.env without templating.
-Environment=RCLONE_VFS_CACHE_MAX_SIZE=4G
+Environment=RCLONE_VFS_CACHE_MAX_SIZE=10G
 Environment=RCLONE_VFS_CACHE_MAX_AGE=72h
 Environment=RCLONE_READ_ONLY=false
 Environment=RCLONE_LOW_LEVEL_RETRIES=3
+EnvironmentFile=-%h/.config/driveway/cloud-defaults.env
 EnvironmentFile=-%h/.config/driveway/%i.env
 # Private 0700 runtime dir per mount for rclone's remote-control socket; the
 # panel reads transfer activity from it. A unix socket in a 0700 directory

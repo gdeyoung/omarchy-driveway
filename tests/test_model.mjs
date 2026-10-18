@@ -88,3 +88,19 @@ test("infoRows drops empty values, includes usage size", () => {
   assert.ok(!keys.includes("UUID"))       // empty → dropped
   assert.ok(!keys.includes("Encryption"))
 })
+
+test("aboutText formats account quota", () => {
+  assert.equal(Model.aboutText({ used: 15 * 1024**3, total: 2 * 1024**4, error: null }),
+               "15.0G / 2.0T  1%")
+  assert.equal(Model.aboutText({ used: 900 * 1024**3, total: 1024**3, error: null }),
+               "900G / 1.0G  100%")
+})
+
+test("aboutText/AboutPct empty on error or missing quota", () => {
+  assert.equal(Model.aboutText(null), "")
+  assert.equal(Model.aboutText({ used: 1, total: 0, error: null }), "")
+  assert.equal(Model.aboutText({ used: 0, total: 100, error: "401" }), "")
+  assert.equal(Model.aboutPct({ used: 25, total: 0, error: null }), 0)
+  assert.equal(Model.aboutPct({ used: 25, total: 100, error: null }), 25)
+  assert.equal(Model.aboutPct({ used: 500, total: 100, error: null }), 100)  // clamped
+})

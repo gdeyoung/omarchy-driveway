@@ -22,24 +22,38 @@ Rectangle {
 
   readonly property color dim: Qt.darker(foreground, 1.55)
 
-  // key, label, glyph, oauth, fields
-  readonly property var providers: [
+  // key, label, glyph, oauth — static fallback; the live list comes from
+  // `driveway cloud providers` via Service.cloudProviders (same keys).
+  readonly property var staticProviders: [
     { key: "gdrive",    label: "Google Drive", glyph: "󰊞", oauth: true },
     { key: "onedrive",  label: "OneDrive",     glyph: "󰅠", oauth: true },
     { key: "dropbox",   label: "Dropbox",      glyph: "󰥫", oauth: true },
+    { key: "box",       label: "Box",          glyph: "󰒄", oauth: true },
+    { key: "pcloud",    label: "pCloud",       glyph: "󰢹", oauth: true },
     { key: "nextcloud", label: "Nextcloud",    glyph: "󰅗", oauth: false },
     { key: "webdav",    label: "WebDAV",       glyph: "󰕮", oauth: false },
     { key: "sftp",      label: "SFTP host",    glyph: "󰣀", oauth: false },
-    { key: "ftp",       label: "FTP host",     glyph: "󰢑", oauth: false }
+    { key: "ftp",       label: "FTP host",     glyph: "󰢑", oauth: false },
+    { key: "s3",        label: "S3 / MinIO / R2", glyph: "󰉟", oauth: false }
   ]
+  readonly property var providerModel: (service && service.cloudProviders
+                                        && service.cloudProviders.length
+                                       ? service.cloudProviders
+                                       : staticProviders).concat(
+    [{ key: "other", label: "Other backend…", glyph: "󰑭", oauth: false }])
   property var provider: null
   readonly property var wstate: service ? service.cloudWizard : { state: "idle" }
   readonly property bool working: wstate.state === "working"
 
   function pick(p) {
+    if (p.key === "other") {
+      service.cloudOtherConfig()
+      wiz.closed()
+      return
+    }
     provider = p
     if (!nameField.text || nameField.text === "" ||
-        providers.some(function(x) { return x.key === nameField.text }))
+        providerModel.some(function(x) { return x.key === nameField.text }))
       nameField.text = p.key
   }
 
@@ -54,6 +68,10 @@ Rectangle {
       if (ncPass.text) extras.password = ncPass.text
     } else if (p.key === "sftp" || p.key === "ftp") {
       extras.host = ncUrl.text.trim()
+      extras.user = ncUser.text.trim()
+      if (ncPass.text) extras.password = ncPass.text
+    } else if (p.key === "s3") {
+      extras.url = ncUrl.text.trim()
       extras.user = ncUser.text.trim()
       if (ncPass.text) extras.password = ncPass.text
     }
@@ -92,10 +110,11 @@ Rectangle {
       rowSpacing: Style.space(6)
 
       Repeater {
-        model: wiz.providers
+        model: wiz.providerModel
         Rectangle {
           required property var modelData
           readonly property bool active: wiz.provider && wiz.provider.key === modelData.key
+          readonly property string glyph: modelData.glyph || "󰉉"
           Layout.fillWidth: true
           implicitHeight: Style.space(40)
           radius: Style.cornerRadius
@@ -106,7 +125,7 @@ Rectangle {
             anchors.centerIn: parent
             spacing: Style.space(8)
             Text {
-              text: modelData.glyph
+              text: glyph
               color: wiz.foreground
               font.family: wiz.fontFamily
               font.pixelSize: Style.font.body
@@ -146,9 +165,11 @@ Rectangle {
       }
       TextField {
         id: ncUrl
-        visible: wiz.provider && ["nextcloud", "webdav", "sftp", "ftp"].indexOf(wiz.provider.key) >= 0
+        visible: wiz.provider && ["nextcloud", "webdav", "sftp", "ftp", "s3"].indexOf(wiz.provider.key) >= 0
         width: parent.width
-        placeholderText: wiz.provider && (wiz.provider.key === "sftp" || wiz.provider.key === "ftp")
+        placeholderText: wiz.provider && wiz.provider.key === "s3"
+          ? "Endpoint (http://host:9000 — leave blank for AWS)"
+          : wiz.provider && (wiz.provider.key === "sftp" || wiz.provider.key === "ftp")
           ? "Host (e.g. files.example.com)"
           : "Server URL (https://cloud.example.com/remote.php/dav/)"
         color: wiz.foreground
@@ -159,9 +180,10 @@ Rectangle {
       }
       TextField {
         id: ncUser
-        visible: wiz.provider && ["nextcloud", "webdav", "sftp", "ftp"].indexOf(wiz.provider.key) >= 0
+        visible: wiz.provider && ["nextcloud", "webdav", "sftp", "ftp", "s3"].indexOf(wiz.provider.key) >= 0
         width: parent.width
-        placeholderText: "User name"
+        placeholderText: wiz.provider && wiz.provider.key === "s3"
+          ? "Access key ID" : "User name"
         color: wiz.foreground
         font.family: wiz.fontFamily
         font.pixelSize: Style.font.body
@@ -170,10 +192,11 @@ Rectangle {
       }
       TextField {
         id: ncPass
-        visible: wiz.provider && ["nextcloud", "webdav", "sftp", "ftp"].indexOf(wiz.provider.key) >= 0
+        visible: wiz.provider && ["nextcloud", "webdav", "sftp", "ftp", "s3"].indexOf(wiz.provider.key) >= 0
         width: parent.width
         echoMode: TextInput.Password
-        placeholderText: "Password"
+        placeholderText: wiz.provider && wiz.provider.key === "s3"
+          ? "Secret access key" : "Password"
         color: wiz.foreground
         font.family: wiz.fontFamily
         font.pixelSize: Style.font.body

@@ -20,6 +20,8 @@ Item {
 
   property var drives: []          // lister rows (incl. the System row)
   property var cloud: ({ rclone: false, unit: false, mountRoot: "", drives: [] })
+  property var cloudDiag: ({})        // name -> {state, problem, remedy}
+  property var cloudProviders: []     // from `cloud providers` once at start
   property var busy: ({})          // drive.key -> {message, procs, uploads}
   property string lastError: ""
 
@@ -81,6 +83,7 @@ Item {
     refreshList()
     refreshCloud()
     refreshNetwork()
+    loadProviders()
   }
 
   function refreshList() {
@@ -138,6 +141,7 @@ Item {
       onStreamFinished: {
         try {
           root.cloud = JSON.parse(text)
+          root._chaseDiagnoses()
         } catch (e) {
           console.warn("gdeyoung.driveway: bad cloud output", e)
         }
@@ -257,6 +261,88 @@ Item {
          "sudo pacman -S --needed rclone gvfs-nfs"])
   }
 
+  // ---- v0.3: quotas, mount-all, diagnose/remedy, providers ------------------
+
+  function loadProviders() {
+    if (cloudProviders.length) return
+    run([script("driveway"), "cloud", "providers"], function(result) {
+      if (result && result.providers) root.cloudProviders = result.providers
+    })
+  }
+
+  // After each cloud status: if any remote looks unhealthy, ask the
+  // backend WHY (one at a time — each diagnose runs bounded commands).
+  function _chaseDiagnoses() {
+    var bad = []
+    var ds = root.cloud.drives || []
+    for (var i = 0; i < ds.length; i++) {
+      var s = ds[i].state
+      if (s === "failed" || s === "hung" || s === "starting")
+        bad.push(ds[i].name)
+    }
+    var next = {}
+    for (var j = 0; j < bad.length; j++) next[bad[j]] = root.cloudDiag[bad[j]] || null
+    root.cloudDiag = next
+    if (bad.length) _diagnoseNext(bad)
+  }
+
+  function _diagnoseNext(queue) {
+    if (!queue || !queue.length) return
+    var name = queue[0]
+    var rest = queue.slice(1)
+    run([script("driveway"), "cloud", "diagnose", name], function(result) {
+      var d = {}
+      for (var k in root.cloudDiag) d[k] = root.cloudDiag[k]
+      d[name] = result
+      root.cloudDiag = d
+      _diagnoseNext(rest)
+    })
+  }
+
+  function cloudMountAll() {
+    run([script("driveway"), "cloud", "mount-all"], function(result) {
+      if (!result.ok) root.lastError = result.message || "mount-all failed"
+      refreshCloud()
+    })
+  }
+
+  function cloudUnmountAll() {
+    run([script("driveway"), "cloud", "unmount-all"], function(result) {
+      if (!result.ok) root.lastError = result.message || "unmount-all failed"
+      refreshCloud()
+    })
+  }
+
+  function cloudRestart(name) {
+    run([script("driveway"), "cloud", "restart", name], function() {
+      refreshCloud()
+    })
+  }
+
+  // Expired sign-in: stops the unit, opens the browser, waits for you
+  // (up to 5.5 min), then remounts.
+  function cloudReconnect(name) {
+    var d = {}
+    for (var k in root.cloudDiag) d[k] = root.cloudDiag[k]
+    d[name] = { state: "reconnecting", problem: "waiting for browser sign-in…",
+                remedy: null }
+    root.cloudDiag = d
+    runWithStdin([script("driveway"), "cloud", "reconnect", name], "{}",
+                 function(result) {
+      if (result.ok) {
+        cloudMount(name)
+      } else {
+        root.lastError = result.message || "reconnect failed"
+        refreshCloud()
+      }
+    }, true, 330000)
+  }
+
+  // Any rclone backend we don't template: rclone's own questionnaire.
+  function cloudOtherConfig() {
+    run(["omarchy-launch-floating-terminal-with-presentation", "rclone config"])
+  }
+
   // ---- network mapping -------------------------------------------------------
 
   function refreshNetwork() {
@@ -329,9 +415,13 @@ Item {
   }
 
   // OAuth providers: browser opens; process waits for sign-in (up to 5 min).
-  // Non-OAuth (nextcloud/webdav/sftp/ftp): direct add with credentials.
+  // Non-OAuth (nextcloud/webdav/sftp/ftp/s3): direct add with credentials.
   function cloudWizardAdd(name, extras) {
-    var oauth = ["gdrive", "onedrive", "dropbox"].indexOf(cloudWizard.provider) >= 0
+    var prov = null
+    for (var i = 0; i < cloudProviders.length; i++)
+      if (cloudProviders[i].key === cloudWizard.provider) prov = cloudProviders[i]
+    var oauth = prov ? !!prov.oauth
+      : ["gdrive", "onedrive", "dropbox", "box", "pcloud"].indexOf(cloudWizard.provider) >= 0
     var cmd = oauth
       ? [script("driveway"), "cloud", "add-oauth", name, cloudWizard.provider]
       : [script("driveway"), "cloud", "add", name, cloudWizard.provider]

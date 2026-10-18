@@ -352,12 +352,65 @@ Panel {
             }
           }
 
+          // mount-all / unmount-all — one click before undocking
+          Row {
+            visible: drv.cloudDrives.length > 1
+            width: parent.width
+            spacing: Style.space(8)
+
+            CursorSurface {
+              width: (parent.width - parent.spacing) / 2
+              foreground: root.foreground
+              bordered: true
+              radius: Style.cornerRadius
+              implicitHeight: mallLabel.implicitHeight + Style.space(12)
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: drv.cloudMountAll()
+              }
+              Text {
+                id: mallLabel
+                anchors.centerIn: parent
+                text: "󰅢  Mount all"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+
+            CursorSurface {
+              width: (parent.width - parent.spacing) / 2
+              foreground: root.foreground
+              bordered: true
+              radius: Style.cornerRadius
+              implicitHeight: mallLabel.implicitHeight + Style.space(12)
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: drv.cloudUnmountAll()
+              }
+              Text {
+                anchors.centerIn: parent
+                text: "󰅃  Unmount all"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+          }
+
           Repeater {
             model: drv.cloudDrives
             CloudRow {
               required property var modelData
               width: parent.width
               remote: modelData
+              diag: drv.cloudDiag[modelData.name] || null
               foreground: root.foreground
               urgent: root.urgent
               fontFamily: root.fontFamily
@@ -366,6 +419,13 @@ Panel {
               onToggleMount: modelData.state === "mounted" || modelData.state === "external"
                 ? drv.cloudUnmount(modelData.name)
                 : drv.cloudMount(modelData.name)
+              onRemedyRequested: function(remedy) {
+                if (remedy === "reconnect") drv.cloudReconnect(modelData.name)
+                else if (remedy === "fix-clock")
+                  drv.run(["omarchy-launch-floating-terminal-with-presentation",
+                           "sudo timedatectl set-ntp true"])
+                else drv.cloudRestart(modelData.name)
+              }
             }
           }
 
@@ -678,8 +738,10 @@ Panel {
     property color urgent: Color.urgent
     property string fontFamily: Style.font.family
     property int fullWarnPct: 90
+    property var diag: null
     signal openRequested()
     signal toggleMount()
+    signal remedyRequested(string remedy)
 
     readonly property color dim: Qt.darker(foreground, 1.55)
     readonly property bool mounted: remote && (remote.state === "mounted" || remote.state === "external")
@@ -687,6 +749,8 @@ Panel {
     readonly property bool busyState: remote && remote.state === "starting"
     readonly property bool full: mounted && remote.size > 0 && remote.pct >= fullWarnPct
     readonly property string chip: remote ? Model.cloudStateLabel(remote.state) : ""
+    readonly property string quota: remote ? Model.aboutText(remote.about) : ""
+    readonly property var problem: diag && diag.problem ? diag.problem : ""
 
     fill: Qt.rgba(1, 1, 1, 0.04)
     radius: Style.cornerRadius
@@ -728,22 +792,74 @@ Panel {
           Text {
             width: parent.width
             textFormat: Text.PlainText
-            text: remote ? [remote.type, Model.usageText(remote)].filter(function(s) { return !!s }).join(" · ") : ""
+            text: remote ? [remote.type, crow.quota || Model.usageText(remote)].filter(function(s) { return !!s }).join(" · ") : ""
             color: crow.dim
             font.family: crow.fontFamily
             font.pixelSize: Style.font.caption
             elide: Text.ElideRight
           }
 
+          // what's wrong + the fix, when diagnose has an answer
+          Row {
+            visible: crow.problem !== ""
+            width: parent.width
+            spacing: Style.space(6)
+
+            Text {
+              width: parent.width - (remedyBtn.visible ? remedyBtn.width + Style.space(8) : 0)
+              textFormat: Text.PlainText
+              text: crow.problem
+              color: crow.urgent
+              font.family: crow.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            CursorSurface {
+              id: remedyBtn
+              visible: crow.diag && crow.diag.remedy
+              foreground: crow.foreground
+              bordered: true
+              radius: height / 2
+              implicitHeight: remedyLabel.implicitHeight + Style.space(8)
+              implicitWidth: remedyLabel.implicitWidth + Style.space(16)
+              anchors.verticalCenter: parent.verticalCenter
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  if (crow.diag.remedy === "reconnect") crow.remedyRequested("reconnect")
+                  else if (crow.diag.remedy === "fix-clock") crow.remedyRequested("fix-clock")
+                  else crow.remedyRequested("restart")
+                }
+              }
+
+              Text {
+                id: remedyLabel
+                anchors.centerIn: parent
+                text: crow.diag && crow.diag.remedy === "reconnect" ? "󰻙 Reconnect"
+                    : crow.diag && crow.diag.remedy === "fix-clock" ? "󰥔 Fix clock"
+                    : "󰜉 Restart"
+                color: crow.foreground
+                font.family: crow.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+          }
+
           Rectangle {
             width: parent.width
             height: Style.space(4)
             radius: height / 2
-            visible: crow.mounted && remote && remote.size > 0
+            visible: remote && (crow.quota !== "" || (crow.mounted && remote.size > 0))
             color: Qt.alpha(crow.dim, 0.35)
 
             Rectangle {
-              width: parent.width * Math.min(1, (remote ? remote.pct : 0) / 100)
+              width: parent.width * Math.min(1, (crow.quota !== ""
+                ? Model.aboutPct(remote.about)
+                : (remote ? remote.pct : 0)) / 100)
               height: parent.height
               radius: parent.radius
               color: crow.full ? crow.urgent : Qt.alpha(crow.foreground, 0.75)

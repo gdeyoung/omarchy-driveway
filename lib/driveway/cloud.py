@@ -23,6 +23,13 @@ from . import lister
 
 UNIT_NAME = "driveway-cloud@.service"
 
+# State dir shared with netmap (DRIVEWAY_CONFIG_DIR override for tests).
+STATE_DIR = Path(os.environ.get("DRIVEWAY_CONFIG_DIR",
+                                os.path.expanduser("~/.config/driveway")))
+ABOUT_CACHE = STATE_DIR / "about.json"
+ABOUT_TTL = 300.0          # seconds a quota reading stays fresh
+ABOUT_TIMEOUT = 6.0        # bounded so the poller never hangs on one remote
+
 # rclone backend type -> display kind (single source of truth: lister).
 KINDS = lister.RCLONE_KINDS
 
@@ -144,6 +151,84 @@ def rc_socket(name):
     return os.path.join(runtime, "driveway-cloud", name, "rc.sock")
 
 
+# ---------------------------------------------------------------- quotas
+
+def _about_load():
+    try:
+        with open(ABOUT_CACHE) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _about_save(cache):
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = STATE_DIR / ".about.json.tmp"
+        tmp.write_text(json.dumps(cache))
+        os.replace(tmp, ABOUT_CACHE)
+    except OSError:
+        pass
+
+
+def about(name, force=False, now=None):
+    """Account quota via `rclone about <name>: --json`, cached.
+
+    Returns {"used": int, "total": int, "error": str|None, "ts": float} or
+    None when nothing is known.  Errors are cached too (short TTL) so a
+    dead backend doesn't get hammered by the poller; auth errors feed
+    diagnose().
+    """
+    import time
+    now = now if now is not None else time.time()
+    cache = _about_load()
+    entry = cache.get(name)
+    if entry and not force:
+        ttl = ABOUT_TTL if not entry.get("error") else 60.0
+        if now - entry.get("ts", 0) < ttl:
+            return entry
+    code, out = _run(["rclone", "about", name + ":", "--json"],
+                     timeout=ABOUT_TIMEOUT)
+    entry = {"ts": now, "error": None, "used": 0, "total": 0}
+    if code != 0:
+        entry["error"] = (out or "rclone about failed").strip().splitlines()[-1][:200]
+    else:
+        try:
+            data = json.loads(out)
+            entry["used"] = int(data.get("used") or 0)
+            entry["total"] = int(data.get("total") or 0)
+        except ValueError:
+            entry["error"] = "bad rclone about output"
+    cache[name] = entry
+    _about_save(cache)
+    return entry
+
+
+def _about_warm_one(rems):
+    """Refresh at most ONE stale cache entry (round-robin) per status call,
+    so the 10s poll never pays for N slow `rclone about` runs."""
+    import time
+    cache = _about_load()
+    now = time.time()
+    stale = [r["name"] for r in rems
+             if not cache.get(r["name"])
+             or now - cache[r["name"]].get("ts", 0) >=
+                 (ABOUT_TTL if not cache[r["name"]].get("error") else 60.0)]
+    if stale:
+        about(stale[0], force=True, now=now)
+
+
+def clock_synced():
+    """True/False/None(unknown) from timedatectl — OAuth token refresh
+    fails when the clock is off (jonspinks/omarchy-rclone lesson)."""
+    code, out = _run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
+                     timeout=5)
+    if code != 0:
+        return None
+    return out.strip().lower() == "yes"
+
+
 def status():
     """Full cloud snapshot for the panel."""
     result = {"rclone": rclone_installed(), "unit": unit_installed(),
@@ -157,6 +242,7 @@ def status():
         name = remote["name"]
         unit = unit_state(name)
         mp = mounted.get(name, "")
+        abt = _about_load().get(name) or {"used": 0, "total": 0, "error": None}
         if mp:
             state = "mounted" if unit else "external"
         elif unit is None:
@@ -181,6 +267,8 @@ def status():
             "nrestarts": int(unit.get("NRestarts", "0") or 0) if unit else 0,
             "pending": -1,
             "size": 0, "used": 0, "pct": 0,
+            "about": {"used": abt.get("used", 0), "total": abt.get("total", 0),
+                      "error": abt.get("error")},
         }
         if mp:
             # Bounded statvfs: a wedged FUSE mount must not hang the poller.
@@ -192,6 +280,7 @@ def status():
                 row["pending"] = lister.rclone_pending(("unix", sock), name + ":")
         rows.append(row)
     result["drives"] = rows
+    _about_warm_one(rems)
     return result
 
 
@@ -230,3 +319,146 @@ def unmount(name):
         if code2 != 0:
             _run(["fusermount3", "-uz", mp], timeout=10)
     return {"ok": code == 0, "message": out or "ok"}
+
+
+def mount_all():
+    """Start every remote's unit in one systemctl call (systemd mounts them
+    in parallel). Skips remotes that are already mounted."""
+    rems = remotes()
+    if not rems:
+        return {"ok": True, "started": [], "message": "no remotes"}
+    install_unit()
+    mounted = mounted_rclone()
+    todo = []
+    for r in rems:
+        if r["name"] not in mounted:
+            try:
+                target = mount_point_for(r["name"])
+                target.mkdir(parents=True, exist_ok=True)
+                os.chmod(target, 0o700)
+            except OSError:
+                continue
+            todo.append("driveway-cloud@%s" % r["name"])
+    if not todo:
+        return {"ok": True, "started": [], "message": "all mounted"}
+    code, out = _run(["systemctl", "--user", "start"] + todo, timeout=60)
+    return {"ok": code == 0, "started": [t.split("@")[1] for t in todo],
+            "message": out or "ok"}
+
+
+def unmount_all():
+    rems = remotes()
+    if not rems:
+        return {"ok": True, "stopped": [], "message": "no remotes"}
+    names = [r["name"] for r in rems]
+    units = ["driveway-cloud@%s" % n for n in names]
+    code, out = _run(["systemctl", "--user", "stop"] + units, timeout=60)
+    # sweep stragglers (external mounts / lazy stops)
+    mounted = mounted_rclone()
+    for n in names:
+        if n in mounted:
+            _run(["fusermount3", "-u", mounted[n]], timeout=10)
+    return {"ok": code == 0, "stopped": names, "message": out or "ok"}
+
+
+# ---------------------------------------------------------------- diagnose
+
+_AUTH_MARKERS = ("invalid_grant", "invalid_request", "401", "unauthorized",
+                 "expired", "refresh_token", "couldn't fetch token",
+                 "token has been expired", "oauth")
+
+
+def _looks_like_auth_error(text):
+    t = (text or "").lower()
+    return any(m in t for m in _AUTH_MARKERS)
+
+
+def diagnose(name):
+    """Why is this remote unhappy, and what fixes it?
+
+    Returns {"state": ..., "problem": str|None, "remedy": str|None}.
+    remedy values: "restart", "reconnect", "fix-clock", None.
+    Never guesses: each verdict is backed by a command's output.
+    """
+    unit = unit_state(name)
+    if unit is None:
+        return {"state": "idle", "problem": None, "remedy": None}
+    active = unit.get("ActiveState", "")
+    result = unit.get("Result", "")
+    nrestarts = int(unit.get("NRestarts", "0") or 0)
+    mp = mounted_rclone().get(name, "")
+
+    if active == "failed" or result == "exit-code":
+        abt = about(name, force=True)
+        err = (abt or {}).get("error") or ""
+        if _looks_like_auth_error(err):
+            if clock_synced() is False:
+                return {"state": "failed",
+                        "problem": "sign-in expired and the clock is unsynced — "
+                                   "OAuth cannot refresh",
+                        "remedy": "fix-clock"}
+            return {"state": "failed",
+                    "problem": "sign-in expired or revoked — rclone needs to "
+                               "re-authorize in your browser",
+                    "remedy": "reconnect"}
+        if clock_synced() is False:
+            return {"state": "failed",
+                    "problem": "system clock is unsynced — OAuth token "
+                               "refresh fails until NTP syncs",
+                    "remedy": "fix-clock"}
+        if nrestarts >= 3:
+            return {"state": "failed",
+                    "problem": "unit in a restart loop (%d restarts) — likely "
+                               "network unreachable or backend down"
+                               % nrestarts,
+                    "remedy": "restart"}
+        return {"state": "failed",
+                "problem": "unit failed to start", "remedy": "restart"}
+
+    if active == "active" and mp:
+        # hung? active + mounted but rc socket dead to the world
+        sock = rc_socket(name)
+        if os.path.exists(sock):
+            pending = lister.rclone_pending(("unix", sock), name + ":")
+            if pending == -1:
+                return {"state": "hung",
+                        "problem": "rclone is running but not responding "
+                                   "(rc socket silent)",
+                        "remedy": "restart"}
+        return {"state": "mounted", "problem": None, "remedy": None}
+
+    if active == "active" and not mp:
+        if nrestarts >= 3:
+            return {"state": "starting",
+                    "problem": "still connecting after %d restarts" % nrestarts,
+                    "remedy": None}
+        return {"state": "starting", "problem": None, "remedy": None}
+
+    return {"state": active or "unknown", "problem": None, "remedy": None}
+
+
+def remedy_restart(name):
+    code, out = _run(["systemctl", "--user", "restart", "driveway-cloud@%s" % name],
+                     timeout=30)
+    return {"ok": code == 0, "message": out or "ok"}
+
+
+def reconnect(name):
+    """Expired OAuth fix: stop the unit first (rclone rewrites rclone.conf —
+    jonspinks lesson: reconnect must not race a running mount), then
+    re-authorize interactively. The browser opens; the token lands in
+    rclone.conf directly. Secrets never cross argv.
+    """
+    if unit_state(name) is not None:
+        _run(["systemctl", "--user", "stop", "driveway-cloud@%s" % name],
+             timeout=30)
+    from .ptyrun import run_expect
+    out, code = run_expect(
+        ["rclone", "config", "reconnect", name + ":"],
+        expects=[], timeout=300.0,
+        done_pattern=r"(Success|Already|Failed|error|not found)")
+    txt = out.decode("utf-8", "replace")
+    ok = code == 0 and ("success" in txt.lower() or "already" in txt.lower())
+    return {"ok": ok,
+            "message": "reauthorized" if ok else txt.strip().splitlines()[-1][:200]
+            if txt.strip() else "exit %s" % code}

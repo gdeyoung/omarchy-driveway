@@ -86,6 +86,19 @@ def cmd_cloud(args):
         print(json.dumps(res))
     elif args.cloud_cmd == "remove":
         print(json.dumps(wizard.remove_remote(args.remote)))
+    elif args.cloud_cmd == "about":
+        print(json.dumps(cloud.about(args.remote, force=args.force)))
+    elif args.cloud_cmd == "mount-all":
+        print(json.dumps(cloud.mount_all()))
+    elif args.cloud_cmd == "unmount-all":
+        print(json.dumps(cloud.unmount_all()))
+    elif args.cloud_cmd == "diagnose":
+        print(json.dumps(cloud.diagnose(args.remote)))
+    elif args.cloud_cmd == "restart":
+        print(json.dumps(cloud.remedy_restart(args.remote)))
+    elif args.cloud_cmd == "reconnect":
+        # long-running: opens the browser; token lands in rclone.conf
+        print(json.dumps(cloud.reconnect(args.remote)))
 
 
 def cmd_netmap(args):
@@ -185,6 +198,17 @@ def build_parser():
     pad.add_argument("provider")
     prm = sub2.add_parser("remove")
     prm.add_argument("remote")
+    pab = sub2.add_parser("about")
+    pab.add_argument("remote")
+    pab.add_argument("--force", action="store_true")
+    sub2.add_parser("mount-all")
+    sub2.add_parser("unmount-all")
+    pdg = sub2.add_parser("diagnose")
+    pdg.add_argument("remote")
+    prs = sub2.add_parser("restart")
+    prs.add_argument("remote")
+    prc = sub2.add_parser("reconnect")
+    prc.add_argument("remote")
 
     p = sub.add_parser("netmap", help="network drive mapping")
     sub3 = p.add_subparsers(dest="netmap_cmd", required=True)

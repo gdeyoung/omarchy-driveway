@@ -29,10 +29,13 @@ PROVIDERS = {
     "gdrive":    ("drive",     "Google Drive", True,  ""),
     "onedrive":  ("onedrive",  "OneDrive",     True,  ""),
     "dropbox":   ("dropbox",   "Dropbox",      True,  ""),
+    "box":       ("box",       "Box",          True,  ""),
+    "pcloud":    ("pcloud",    "pCloud",       True,  ""),
     "nextcloud": ("webdav",    "Nextcloud",    False, "needs URL + login"),
     "webdav":    ("webdav",    "WebDAV",       False, "needs URL + login"),
     "sftp":      ("sftp",      "SFTP host",    False, "host + login"),
     "ftp":       ("ftp",       "FTP host",     False, "host + login"),
+    "s3":        ("s3",        "S3 / MinIO / R2", False, "access key + secret"),
 }
 
 
@@ -161,6 +164,19 @@ def add_remote(name: str, provider_key: str, token: str | None = None,
             fields.append(("user", user))
         if password:
             fields.append(("pass", obscure(password)))
+    elif rtype == "s3":
+        # keys arrive via stdin JSON (Service.runWithStdin) — never argv;
+        # written straight into rclone.conf, secret kept plain like rclone
+        # itself does (rclone stores s3 keys unobscured).
+        if not user:                      # user == access_key_id here
+            raise WizardError("s3 requires access key id")
+        if not password:                  # password == secret_access_key
+            raise WizardError("s3 requires secret access key")
+        fields += [("access_key_id", user), ("secret_access_key", password)]
+        if url:                           # endpoint for MinIO/R2/other
+            fields.append(("endpoint", url))
+        if extra and extra.get("region"):
+            fields.append(("region", str(extra["region"])))
     if extra:
         for k, v in extra.items():
             if k not in ("type", "token", "pass"):

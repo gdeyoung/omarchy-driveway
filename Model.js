@@ -82,6 +82,19 @@ function usageText(drive) {
   return humanBytes(drive.used) + " / " + humanBytes(drive.size) + "  " + drive.pct + "%"
 }
 
+// Account quota from `rclone about`: "14.5G / 2T  1%", or "" when unknown
+// (backend has no quota, or the reading errored).
+function aboutText(about) {
+  if (!about || !(about.total > 0) || about.error) return ""
+  var pct = Math.min(100, Math.round(100 * (about.used || 0) / about.total))
+  return humanBytes(about.used || 0) + " / " + humanBytes(about.total) + "  " + pct + "%"
+}
+
+function aboutPct(about) {
+  if (!about || !(about.total > 0) || about.error) return 0
+  return Math.min(100, Math.round(100 * (about.used || 0) / about.total))
+}
+
 function groupDigits(n) {
   return String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ",")
 }
@@ -176,6 +189,8 @@ if (typeof module !== "undefined") {
     cloudUrgent: cloudUrgent,
     humanBytes: humanBytes,
     usageText: usageText,
+    aboutText: aboutText,
+    aboutPct: aboutPct,
     infoRows: infoRows,
     filterDrives: filterDrives,
     barState: barState,

@@ -573,6 +573,9 @@ def cache_set(target: str, size: str) -> dict:
     val = normalize_size(size)
     if val is None:
         return {"ok": False, "error": "invalid size %r (use e.g. 10G, 500M, off)" % size}
+    # The unit template is a COPY in the user dir — plugin updates do not
+    # touch it. Re-sync first so the EnvironmentFile chain always exists.
+    install_unit()
     data = _settings_load()
     changed_units = []
     if target == "global":

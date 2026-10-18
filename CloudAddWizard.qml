@@ -75,7 +75,7 @@ Rectangle {
       extras.user = ncUser.text.trim()
       if (ncPass.text) extras.password = ncPass.text
     }
-    service.cloudWizardAdd(nameField.text.trim(), extras)
+    service.cloudWizardAdd(nameField.text.trim(), extras, p.key)
   }
 
   Column {

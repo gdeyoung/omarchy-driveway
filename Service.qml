@@ -416,15 +416,19 @@ Item {
 
   // OAuth providers: browser opens; process waits for sign-in (up to 5 min).
   // Non-OAuth (nextcloud/webdav/sftp/ftp/s3): direct add with credentials.
-  function cloudWizardAdd(name, extras) {
+  // providerKey comes from the wizard's own selection (wiz.provider) — the
+  // service-side cloudWizard.provider is display state only.
+  function cloudWizardAdd(name, extras, providerKey) {
+    var pk = providerKey || cloudWizard.provider || ""
+    cloudWizard = Object.assign({}, cloudWizard, { provider: pk })
     var prov = null
     for (var i = 0; i < cloudProviders.length; i++)
-      if (cloudProviders[i].key === cloudWizard.provider) prov = cloudProviders[i]
+      if (cloudProviders[i].key === pk) prov = cloudProviders[i]
     var oauth = prov ? !!prov.oauth
-      : ["gdrive", "onedrive", "dropbox", "box", "pcloud"].indexOf(cloudWizard.provider) >= 0
+      : ["gdrive", "onedrive", "dropbox", "box", "pcloud"].indexOf(pk) >= 0
     var cmd = oauth
-      ? [script("driveway"), "cloud", "add-oauth", name, cloudWizard.provider]
-      : [script("driveway"), "cloud", "add", name, cloudWizard.provider]
+      ? [script("driveway"), "cloud", "add-oauth", name, pk]
+      : [script("driveway"), "cloud", "add", name, pk]
     cloudWizard = Object.assign({}, cloudWizard, {
       state: "working", phase: oauth ? "waiting for browser sign-in…" : "adding…",
       error: "" })

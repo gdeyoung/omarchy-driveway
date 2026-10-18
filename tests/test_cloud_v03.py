@@ -6,6 +6,7 @@ All rclone/systemctl calls are mocked; nothing hits the network.
 """
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -237,45 +238,82 @@ class TestProviders(unittest.TestCase):
                 with self.assertRaises(wizard.WizardError):
                     wizard.add_remote("nope", "s3")
 
+class TestDebugLogRedaction(unittest.TestCase):
+    """Tokens must never survive _debug_log, in either rclone output shape."""
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_pipe_and_pty_shapes_redacted(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.dict(os.environ, {"DRIVEWAY_CONFIG_DIR": d}):
+            pipe = ('stdout:\n{"access_token":"ABC.DEF.GHI","token_type":"Bearer",'
+                    '"refresh_token":"REFR","expiry":"x"}\n')
+            pty = ('Paste the following into your remote machine --->\n'
+                   'eyJhbGciOiJSUzI1NiIsImtpZCI6IjFhMjM0NTY3ODlhYmNkZWYxMjM0NTY3ODlhYmNkZWYifQ\n'
+                   '<---End paste\n')
+            wizard._debug_log(pipe, 0, "pipes")
+            wizard._debug_log(pty, 0, "pty")
+            log = open(os.path.join(d, "authorize-debug.log")).read()
+            for secret in ("ABC.DEF.GHI", "REFR",
+                           "eyJhbGciOiJSUzI1NiIsImtpZCI6IjFh"):
+                self.assertNotIn(secret, log)
 
 
-class TestAuthorizeParse(unittest.TestCase):
-    REAL_FIRST_RUN = (
-        '2026/10/17 19:55:45 NOTICE : Config file '
-        '"/home/gdeyoung/.config/rclone/rclone.conf" not found - using defaults\r\n'
-        '2026/10/17 19:55:45 NOTICE : If your browser doesn\'t open automatically '
-        'go to the following link: http://127.0.0.1:53682/auth?state=x\r\n'
-        '2026/10/17 19:55:45 NOTICE : Waiting for code...\r\n'
-        'Success!\r\n---> {"access_token":"SECRET"} <---\r\n')
+class TestAuthorizePipes(unittest.TestCase):
+    """authorize must run over PIPES: full JSON token on stdout, chatter on
+    stderr (community/ODrive-verified; the pty path prints base64 instead)."""
 
-    def test_first_run_notice_is_not_notinstalled(self):
-        with mock.patch.object(wizard, "run_expect",
-                               return_value=(self.REAL_FIRST_RUN.encode(), 0)):
-            res = wizard.authorize_oauth("drive")
-        self.assertEqual(res["token"], '{"access_token":"SECRET"}')
+    class _Proc:
+        def __init__(self, out="", err="", code=0):
+            import subprocess as sp
+            self._out, self._err, self.returncode = out, err, code
+            self._te = getattr(sp, "_TE", None)
+        def communicate(self, timeout=None):
+            import subprocess as sp
+            if self._te:
+                self._te = False
+                raise sp.TimeoutExpired(cmd="rclone", timeout=timeout)
+            return self._out, self._err
+        def kill(self):
+            pass
 
-    def test_shell_missing_binary_is_notinstalled(self):
-        with mock.patch.object(
-                wizard, "run_expect",
-                return_value=(b"/bin/sh: rclone: command not found\n", 127)):
+    def _auth(self, proc):
+        with mock.patch.object(wizard.subprocess, "Popen", return_value=proc):
+            return wizard.authorize_oauth("drive")
+
+    def test_token_json_from_stdout(self):
+        p = self._Proc(out='{"access_token":"A","token_type":"Bearer",'
+                          '"refresh_token":"R","expiry":"2026"}',
+                      err='NOTICE: Waiting for code...\nNOTICE: Got code\n')
+        res = self._auth(p)
+        self.assertIn("access_token", res["token"])
+
+    def test_missing_binary(self):
+        import subprocess as sp
+        with mock.patch.object(wizard.subprocess, "Popen",
+                               side_effect=FileNotFoundError()):
             with self.assertRaises(wizard.WizardError) as cm:
                 wizard.authorize_oauth("drive")
         self.assertIn("not installed", str(cm.exception))
 
-    def test_token_arrives_after_success_line(self):
-        # Regression: rclone prints "Success!" BEFORE the token block; the
-        # runner must keep reading until the closing marker, not stop at
-        # Success (a real sign-in was lost to this race).
-        import threading, time
-        from driveway import ptyrun
-        script = (
-            'printf "Waiting for code...\\n"; sleep 0.3; '
-            'printf "Got code\\nSuccess!\\n"; sleep 0.7; '
-            'printf -- \'---> {"access_token":"LATE"} <---\\n\'')
-        out, code = ptyrun.run_expect(["bash", "-c", script], expects=[],
-                                      timeout=10, done_pattern=r"(<-{2,4}|Failed|[Ee]rror)")
-        txt = out.decode()
-        self.assertIn("LATE", txt)
+    def test_failure_reports_stderr_tail(self):
+        p = self._Proc(out="", err="NOTICE: bad\nError: invalid_grant", code=1)
+        with self.assertRaises(wizard.WizardError) as cm:
+            self._auth(p)
+        self.assertIn("invalid_grant", str(cm.exception))
+
+    def test_timeout(self):
+        import subprocess as sp
+        p = self._Proc()
+        p._te = True
+        with self.assertRaises(wizard.WizardError) as cm:
+            self._auth(p)
+        self.assertIn("timed out", str(cm.exception))
+
+    def test_no_token_is_error(self):
+        p = self._Proc(out="nothing useful", err="")
+        with self.assertRaises(wizard.WizardError):
+            self._auth(p)
+
+
+if __name__ == "__main__":
+    unittest.main()

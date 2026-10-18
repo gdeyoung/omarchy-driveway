@@ -55,10 +55,17 @@ def providers() -> list[dict]:
 
 def _debug_log(txt: str, code, note: str = "") -> None:
     """Redacted capture of what authorize actually saw, for field debugging.
-    Token JSON is masked — secrets never land in this log."""
+    Shape-independent redaction — tokens never land in this log."""
     try:
-        redacted = re.sub(r"(\{\\?\"access_token.*?)\}(?=\s*<-{2,4}|\s*$)",
-                          "{TOKEN_REDACTED}", txt, flags=re.S)
+        # 1) mask values of any token-ish JSON key (pipe mode prints bare
+        #    JSON on stdout; pty mode wraps it in markers — cover both)
+        for key in ("access_token", "refresh_token", "id_token", "token"):
+            redacted = re.sub(r'("%s"\s*:\s*)"[^"]*"' % key, r'\1"***"', txt)
+            txt = redacted
+        # 2) mask leftover long base64/credential-looking runs (the pty-mode
+        #    "Paste the following" blob) — 60+ chars is never a URL fragment
+        redacted = re.sub(r"[A-Za-z0-9+/=_-]{60,}", "<TOKEN_REDACTED>", txt)
+        # 3) refresh_token query params
         redacted = re.sub(r"refresh_token=+[^\s&\"]+", "refresh_token=REDACTED",
                           redacted)
         path = Path(os.environ.get("DRIVEWAY_CONFIG_DIR",
@@ -77,34 +84,42 @@ def _debug_log(txt: str, code, note: str = "") -> None:
 def authorize_oauth(rtype: str, timeout: float = 300.0) -> dict:
     """Run `rclone authorize <rtype>` and capture the token JSON.
 
+    MUST run over PIPES, never a pty (community-verified: ODrive does the
+    same): on a pipe rclone writes the full token JSON to stdout and the
+    NOTICE chatter to stderr; on a terminal it prints a base64
+    "Paste the following into your remote machine" blob instead (and the
+    pty path is where truncation/abbreviation bugs live — three real
+    sign-ins were lost to it).  stdin is DEVNULL so nothing can prompt.
+
     Returns {"token": "<json string>"} — caller must not log this.
     Raises WizardError on failure/timeout.
-
-    NOTE: rclone's first-run banner says `Config file ... not found - using
-    defaults` — a bare "not found" match is NOT a missing-binary signal
-    (that bit us on a fresh machine).  Only explicit shell/command failures
-    count as not-installed.
     """
-    out, code = run_expect(
-        ["rclone", "authorize", rtype, ""],
-        expects=[], timeout=timeout,
-        # Done = the CLOSING token marker, never "Success!" — rclone prints
-        # "Success!" BEFORE the token, and matching early kills the process
-        # before the token is flushed (lost a real sign-in to this race).
-        done_pattern=r"(<-{2,4}|Failed|[Ee]rror)")
-    txt = out.decode("utf-8", "replace")
-    if "command not found" in txt or "rclone: command" in txt:
-        _debug_log(txt, code, "not-installed")
+    env = dict(os.environ)
+    try:
+        proc = subprocess.Popen(
+            ["rclone", "authorize", rtype],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env=env)
+    except FileNotFoundError:
         raise WizardError("rclone is not installed")
-    m = re.search(r"-{2,4}>\s*(\{.*?\})\s*<-{2,4}", txt, re.S)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        _debug_log("", None, "timeout")
+        raise WizardError("authorization timed out waiting for browser sign-in")
+    _debug_log("stdout:\n%s\nstderr:\n%s" % (stdout, stderr), proc.returncode,
+               "pipes")
+    if proc.returncode != 0:
+        err = (stderr or "").strip().splitlines()
+        raise WizardError("authorization failed: %s"
+                          % (err[-1][:200] if err else "exit %d" % proc.returncode))
+    m = re.search(r"\{[\s\S]*\"access_token\"[\s\S]*\}", stdout)
     if not m:
-        m = re.search(r"(\{\"access_token\".*?\})", txt, re.S)
-    if not m:
-        _debug_log(txt, code, "no-token len=%d" % len(txt))
-        tail = txt.strip().splitlines()[-1] if txt.strip() else f"exit {code}"
-        raise WizardError(f"authorization did not complete: {tail[:200]}")
-    _debug_log(txt, code, "ok len=%d" % len(txt))
-    return {"token": m.group(1)}
+        raise WizardError("authorization did not return a token")
+    return {"token": m.group(0).strip()}
 
 
 # ---------------------------------------------------------------- obscure

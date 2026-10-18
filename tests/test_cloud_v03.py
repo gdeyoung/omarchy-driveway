@@ -264,3 +264,18 @@ class TestAuthorizeParse(unittest.TestCase):
             with self.assertRaises(wizard.WizardError) as cm:
                 wizard.authorize_oauth("drive")
         self.assertIn("not installed", str(cm.exception))
+
+    def test_token_arrives_after_success_line(self):
+        # Regression: rclone prints "Success!" BEFORE the token block; the
+        # runner must keep reading until the closing marker, not stop at
+        # Success (a real sign-in was lost to this race).
+        import threading, time
+        from driveway import ptyrun
+        script = (
+            'printf "Waiting for code...\\n"; sleep 0.3; '
+            'printf "Got code\\nSuccess!\\n"; sleep 0.7; '
+            'printf -- \'---> {"access_token":"LATE"} <---\\n\'')
+        out, code = ptyrun.run_expect(["bash", "-c", script], expects=[],
+                                      timeout=10, done_pattern=r"(<-{2,4}|Failed|[Ee]rror)")
+        txt = out.decode()
+        self.assertIn("LATE", txt)

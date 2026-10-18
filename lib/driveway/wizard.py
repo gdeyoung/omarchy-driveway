@@ -67,7 +67,10 @@ def authorize_oauth(rtype: str, timeout: float = 300.0) -> dict:
     out, code = run_expect(
         ["rclone", "authorize", rtype, ""],
         expects=[], timeout=timeout,
-        done_pattern=r"(Success|Got code|Failed|[Ee]rror)")
+        # Done = the CLOSING token marker, never "Success!" — rclone prints
+        # "Success!" BEFORE the token, and matching early kills the process
+        # before the token is flushed (lost a real sign-in to this race).
+        done_pattern=r"(<-{2,4}|Failed|[Ee]rror)")
     txt = out.decode("utf-8", "replace")
     if "command not found" in txt or "rclone: command" in txt:
         raise WizardError("rclone is not installed")

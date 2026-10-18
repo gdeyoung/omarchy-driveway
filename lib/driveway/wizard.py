@@ -58,13 +58,18 @@ def authorize_oauth(rtype: str, timeout: float = 300.0) -> dict:
 
     Returns {"token": "<json string>"} — caller must not log this.
     Raises WizardError on failure/timeout.
+
+    NOTE: rclone's first-run banner says `Config file ... not found - using
+    defaults` — a bare "not found" match is NOT a missing-binary signal
+    (that bit us on a fresh machine).  Only explicit shell/command failures
+    count as not-installed.
     """
     out, code = run_expect(
         ["rclone", "authorize", rtype, ""],
         expects=[], timeout=timeout,
-        done_pattern=r"(Success|Success!|Got code|Failed|error|not found)")
+        done_pattern=r"(Success|Got code|Failed|[Ee]rror)")
     txt = out.decode("utf-8", "replace")
-    if "not found" in txt or "command not found" in txt:
+    if "command not found" in txt or "rclone: command" in txt:
         raise WizardError("rclone is not installed")
     m = re.search(r"-\--->\s*(\{.*?\})\s*<---", txt, re.S)
     if not m:

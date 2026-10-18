@@ -240,3 +240,27 @@ class TestProviders(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAuthorizeParse(unittest.TestCase):
+    REAL_FIRST_RUN = (
+        '2026/10/17 19:55:45 NOTICE : Config file '
+        '"/home/gdeyoung/.config/rclone/rclone.conf" not found - using defaults\r\n'
+        '2026/10/17 19:55:45 NOTICE : If your browser doesn\'t open automatically '
+        'go to the following link: http://127.0.0.1:53682/auth?state=x\r\n'
+        '2026/10/17 19:55:45 NOTICE : Waiting for code...\r\n'
+        'Success!\r\n---> {"access_token":"SECRET"} <---\r\n')
+
+    def test_first_run_notice_is_not_notinstalled(self):
+        with mock.patch.object(wizard, "run_expect",
+                               return_value=(self.REAL_FIRST_RUN.encode(), 0)):
+            res = wizard.authorize_oauth("drive")
+        self.assertEqual(res["token"], '{"access_token":"SECRET"}')
+
+    def test_shell_missing_binary_is_notinstalled(self):
+        with mock.patch.object(
+                wizard, "run_expect",
+                return_value=(b"/bin/sh: rclone: command not found\n", 127)):
+            with self.assertRaises(wizard.WizardError) as cm:
+                wizard.authorize_oauth("drive")
+        self.assertIn("not installed", str(cm.exception))

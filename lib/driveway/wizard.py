@@ -71,9 +71,9 @@ def authorize_oauth(rtype: str, timeout: float = 300.0) -> dict:
     txt = out.decode("utf-8", "replace")
     if "command not found" in txt or "rclone: command" in txt:
         raise WizardError("rclone is not installed")
-    m = re.search(r"-\--->\s*(\{.*?\})\s*<---", txt, re.S)
+    m = re.search(r"-{2,4}>\s*(\{.*?\})\s*<-{2,4}", txt, re.S)
     if not m:
-        m = re.search(r"(\{\"access_token\".*?\})\s*\n", txt, re.S)
+        m = re.search(r"(\{\"access_token\".*?\})", txt, re.S)
     if not m:
         tail = txt.strip().splitlines()[-1] if txt.strip() else f"exit {code}"
         raise WizardError(f"authorization did not complete: {tail[:200]}")

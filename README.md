@@ -42,6 +42,23 @@ One bar icon opens a tabbed panel:
 omarchy plugin add https://github.com/gdeyoung/omarchy-driveway.git --enable
 ```
 
+## Remove
+
+```
+omarchy plugin remove gdeyoung.driveway --yes
+```
+
+`plugin remove` clears the plugin itself; its user services and state
+outlive it, so finish with:
+
+```
+systemctl --user stop 'driveway-cloud@*' driveway-gvfs-fuse.service driveway-netmap.service
+systemctl --user disable 'driveway-cloud@*' driveway-gvfs-fuse.service driveway-netmap.service 2>/dev/null
+rm -rf ~/.local/state/driveway ~/.config/systemd/user/driveway-cloud@.service \
+       ~/.config/systemd/user/driveway-gvfs-fuse.service ~/.config/systemd/user/driveway-netmap.service
+systemctl --user daemon-reload
+```
+
 ## Keyboard
 
 `1`/`2`/`3` switch tabs · `←`/`→` cycle tabs · `/` search · `Esc` clear search

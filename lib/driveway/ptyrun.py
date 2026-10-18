@@ -208,14 +208,12 @@ def run_expect(cmd: list[str],
             if not progressed and not answered and not expects:
                 pass  # pure capture; wait for exit
     finally:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        # done_pattern breaks may race the child's natural exit: closing the
-        # master can HUP it first (exit 129 instead of its real code). Wait
-        # briefly for a real exit before resorting to a kill.
+        # ORDER MATTERS: closing the pty master sends SIGHUP to the child's
+        # foreground group. Wait for a natural exit FIRST (done_pattern breaks
+        # race the child's own exit), and only then close. If the child is
+        # still alive after the grace window, kill it and collect.
         deadline = time.monotonic() + 0.6
+        exited = False
         while time.monotonic() < deadline:
             try:
                 waited, wstatus = os.waitpid(pid, os.WNOHANG)
@@ -224,14 +222,19 @@ def run_expect(cmd: list[str],
                 waited = pid
             if waited == pid:
                 status = wstatus
+                exited = True
                 break
             time.sleep(0.02)
-        else:
+        if not exited:
             try:
                 os.kill(pid, 15)
                 _, status = os.waitpid(pid, 0)
             except (ProcessLookupError, ChildProcessError):
                 status = status if status is not None else 0
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
     if status is None:
         return bytes(out), 0

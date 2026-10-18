@@ -25,6 +25,7 @@ Item {
   property string cloudCacheBusy: ""  // target with a save in flight
   property var cloudProviders: []     // from `cloud providers` once at start
   property var busy: ({})          // drive.key -> {message, procs, uploads}
+  property var inflight: ({})      // run() cmd key -> start-ms (overlap guard)
   property string lastError: ""
 
   // ---- network mapping (v0.2) ------------------------------------------------
@@ -79,6 +80,7 @@ Item {
   property var lister: null
   property real listerStarted: 0
   readonly property int listerTimeoutMs: 20000
+  readonly property int runTimeoutMs: 20000   // run() overlap-guard abandon window
   property bool refreshAgain: false
 
   function refresh() {
@@ -317,9 +319,11 @@ Item {
   }
 
   function loadCloudCache() {
+    // quiet=true: this is a poller — completing it must NOT trigger a full
+    // refresh() (non-quiet was a self-sustaining refresh feedback loop).
     run([script("driveway"), "cloud", "cache-get"], function(result) {
       if (result && result.remotes !== undefined) root.cloudCache = result
-    })
+    }, true)
   }
 
   function cloudCacheSet(target, size) {
@@ -487,8 +491,18 @@ Item {
   // Short-lived process; `done(result)` gets the JSON line the CLI prints.
   // quiet=true: don't trigger the full refresh on exit (caller refreshes).
   function run(cmd, done, quiet) {
+    // Overlap guard: never stack a second copy of a command that is still
+    // running. Pollers fire every tick; one slow rclone call must not fan out.
+    var key = cmd.join(" ")
+    var started = inflight[key]
+    if (started !== undefined) {
+      if (Date.now() - started < runTimeoutMs) return
+      console.warn("gdeyoung.driveway: run still busy after " + (runTimeoutMs / 1000) + "s: " + key)
+      delete inflight[key]   // abandon the tracker; let this call retry once
+    }
+    inflight[key] = Date.now()
     var p = actionProcess.createObject(root, { command: cmd, done: done || null,
-                                                quiet: !!quiet })
+                                                quiet: !!quiet, cmdKey: key })
     p.running = true
   }
 
@@ -508,8 +522,10 @@ Item {
     Process {
       property var done: null
       property bool quiet: false
+      property string cmdKey: ""
       stdout: StdioCollector { id: out }
       onExited: {
+        if (cmdKey) delete root.inflight[cmdKey]
         if (done) {
           var result = { status: "error", message: "" }
           try { result = JSON.parse(out.text.trim().split("\n").pop()) } catch (e) {}

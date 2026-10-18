@@ -26,6 +26,7 @@ Panel {
   property bool netWizardOpen: false
   property bool cloudWizardOpen: false
   property bool cacheOpen: false
+  property bool settingsOpen: false
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
@@ -64,6 +65,7 @@ Panel {
   Service {
     id: drv
     settings: root.settings
+    shellApi: root.bar ? (root.bar.shell || null) : null
     panelOpen: root.opened
   }
 
@@ -174,6 +176,7 @@ Panel {
       anchors.fill: parent
       contentWidth: width
       contentHeight: root.netWizardOpen || root.cloudWizardOpen || root.cacheOpen
+                     || root.settingsOpen
         ? wizHost.implicitHeight
         : column.implicitHeight
       clip: true
@@ -185,6 +188,7 @@ Panel {
       Column {
         id: column
         visible: !root.netWizardOpen && !root.cloudWizardOpen && !root.cacheOpen
+                 && !root.settingsOpen
         width: panelFlick.width
         spacing: Style.space(12)
 
@@ -196,6 +200,34 @@ Panel {
               required property string modelData
               key: modelData
               label: root.tabTitle(modelData)
+            }
+          }
+
+          CursorSurface {
+            foreground: root.foreground
+            bordered: true
+            radius: Style.cornerRadius
+            implicitHeight: gearText.implicitHeight + Style.space(8)
+            width: gearText.implicitWidth + Style.space(16)
+
+            MouseArea {
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: {
+                root.netWizardOpen = false
+                root.cloudWizardOpen = false
+                root.cacheOpen = false
+                root.settingsOpen = true
+              }
+            }
+            Text {
+              id: gearText
+              anchors.centerIn: parent
+              text: "󰒓"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
             }
           }
         }
@@ -606,6 +638,17 @@ Panel {
             horizontalAlignment: Text.AlignHCenter
           }
         }
+
+        // keyboard affordance: the shortcuts work but are invisible otherwise
+        Text {
+          width: parent.width
+          textFormat: Text.PlainText
+          text: "1·2·3 tabs    /  search    r  refresh"
+          color: Qt.alpha(root.foreground, 0.45)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          horizontalAlignment: Text.AlignHCenter
+        }
       }
 
       // wizards — inline as the scroller's content while open (tab column
@@ -613,6 +656,7 @@ Panel {
       Column {
         id: wizHost
         visible: root.netWizardOpen || root.cloudWizardOpen || root.cacheOpen
+                 || root.settingsOpen
         width: panelFlick.width
         spacing: Style.space(4)
 
@@ -638,6 +682,18 @@ Panel {
           fontFamily: root.fontFamily
           service: drv
           onClosed: root.cacheOpen = false
+        }
+
+        GeneralSettings {
+          id: genSet
+          visible: root.settingsOpen
+          width: parent.width
+          height: genSet.implicitHeight
+          foreground: root.foreground
+          urgent: root.urgent
+          fontFamily: root.fontFamily
+          service: drv
+          onClosed: root.settingsOpen = false
         }
 
         CloudAddWizard {

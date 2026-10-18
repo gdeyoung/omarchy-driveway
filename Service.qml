@@ -46,8 +46,10 @@ Item {
   signal netNeedsCreds(string server)
 
   readonly property int pollMs: Math.max(2, Number(setting("pollIntervalSec", 10)) || 10) * 1000
+  readonly property int pollSec: Math.round(pollMs / 1000)
   readonly property bool showNetwork: setting("showNetwork", true) !== false
   readonly property bool showUnmounted: setting("showUnmounted", true) !== false
+  function settingBool(name) { return setting(name, true) !== false }
   readonly property real minUnmountedMb: Number(setting("minUnmountedMb", 64))
   readonly property real thumbMaxGb: Number(setting("thumbMaxGb", 256)) || 256
   readonly property int fullWarnPct: Number(setting("fullWarnPct", 90)) || 90
@@ -66,6 +68,47 @@ Item {
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
     return value === undefined || value === null ? fallback : value
+  }
+
+  // ---- settings persistence (powercore pattern: serialized + confirmed) ----
+  // Writes merge onto the last shell-CONFIRMED settings (the `settings` object
+  // the bar pushes after shell.json changes), never onto mid-burst state; the
+  // next queued patch waits for confirmation or the 3s no-op timer.
+  property var shellApi: null           // Panel binds: bar ? (bar.shell || null) : null
+  property var confirmedSettings: ({})
+  property var pendingSettingPatches: ([])
+  property bool settingsWriteBusy: false
+  onSettingsChanged: confirmedSettings = settings || ({})
+
+  function saveSetting(key, value) {
+    pendingSettingPatches = pendingSettingPatches.concat([{ key: key, value: value }])
+    drainSettings()
+  }
+
+  function drainSettings() {
+    if (settingsWriteBusy || pendingSettingPatches.length === 0) return
+    settingsWriteBusy = true
+    var merged = {}
+    for (var k in confirmedSettings) merged[k] = confirmedSettings[k]
+    var patches = pendingSettingPatches
+    pendingSettingPatches = []
+    for (var i = 0; i < patches.length; i++) merged[patches[i].key] = patches[i].value
+    settingsBusyTimer.restart()
+    if (shellApi && typeof shellApi.updateEntryInline === "function") {
+      shellApi.updateEntryInline("gdeyoung.driveway", merged)
+    } else {
+      settingsWriteBusy = false
+      settingsBusyTimer.stop()
+      console.warn("gdeyoung.driveway: settings change not persisted (no shell API)")
+    }
+  }
+
+  // No-op writes never change the file, so the confirmation push never fires;
+  // this clears the busy flag instead.
+  Timer {
+    id: settingsBusyTimer
+    interval: 3000
+    onTriggered: { root.settingsWriteBusy = false; root.drainSettings() }
   }
 
   function script(name) {

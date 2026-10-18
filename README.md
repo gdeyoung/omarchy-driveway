@@ -85,8 +85,11 @@ restarts the affected mount automatically.
 
 ## Settings (bar widget settings)
 
-`pollIntervalSec` (10) · `showNetwork` (true) · `showUnmounted` (true) ·
-`thumbMaxGb` (256) · `minUnmountedMb` (64) · `fullWarnPct` (90).
+Gear button in the panel header. Refresh interval (`pollIntervalSec`, 10s),
+show network & cloud drives (`showNetwork`), show unmounted drives
+(`showUnmounted`), nearly-full threshold (`fullWarnPct`, 90%). Classifier
+internals stay CLI/JSON-only: `thumbMaxGb` (256), `minUnmountedMb` (64) —
+`omarchy bar set gdeyoung.driveway <key> <value>` for those.
 
 ## Development
 

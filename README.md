@@ -1,6 +1,9 @@
 # Driveway
 
-Every drive in one place — the old Mac volume menu, rebuilt for Omarchy.
+![Driveway](preview.png)
+
+Every drive you own, one click from the bar — the old Mac volume
+menu, rebuilt for Omarchy.
 
 One bar icon opens a tabbed panel:
 

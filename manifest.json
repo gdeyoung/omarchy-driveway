@@ -5,7 +5,7 @@
   "version": "0.4.2",
   "author": "Greg DeYoung",
   "license": "MIT",
-  "description": "Every drive in one place: thumb drives, disks, SD cards, network shares and rclone cloud drives \u2014 mounted, browsed, opened and ejected from a tabbed bar panel. Cloud remotes ride supervised systemd units with health states and pending-upload awareness.",
+  "description": "Every drive you own, one click from the bar: thumb drives, disks, SD cards, SMB/NFS/sshfs shares and rclone cloud mounts — mounted, browsed, opened and ejected from one tabbed panel. Mapped network drives remount at login; cloud remotes ride supervised systemd units with health states, pending-upload awareness and per-drive disk-cache limits. Settings live right in the panel.",
   "kinds": [
     "bar-widget"
   ],

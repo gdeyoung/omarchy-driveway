@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { width: 2000px; height: 1125px; overflow: hidden; margin: 0; }
+  body {
+    background: #0d0f14;
+    font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+    position: relative;
+  }
+
+  /* ---- left column ---- */
+  .left { position: absolute; left: 100px; top: 118px; width: 820px; }
+  .eyebrow {
+    font-size: 26px; font-weight: 700; letter-spacing: 6px;
+    color: #60a5fa;
+  }
+  h1 {
+    margin: 30px 0 0 0; font-size: 74px; font-weight: 800; color: #fff;
+    line-height: 1.08; letter-spacing: -1px;
+    font-family: "Inter", "DejaVu Sans", sans-serif;
+    white-space: nowrap;
+  }
+  .para {
+    margin-top: 34px; font-size: 22px; line-height: 1.55; color: #a8b4ae;
+    max-width: 800px;
+  }
+  .bullets { position: absolute; left: 100px; top: 640px; width: 820px; }
+  .bcol { position: absolute; width: 370px; font-size: 20px; line-height: 1.45;
+          color: #c8d0cb; font-weight: 300; }
+  .bcol.a { left: 0; }
+  .bcol.b { left: 450px; }
+  .bcol div { margin-bottom: 24px; padding-left: 34px; position: relative; }
+  .bcol div::before { content: "◆"; color: #60a5fa; position: absolute;
+                      left: 0; font-size: 16px; top: 4px; }
+
+  /* ---- footer ---- */
+  .footer { position: absolute; left: 100px; right: 100px; top: 1010px;
+            border-top: 1px solid #2a2f36; padding-top: 26px;
+            font-size: 18px; color: #8a9490; }
+  .footer .row { display: flex; justify-content: space-between; }
+  .accent { color: #60a5fa; }
+
+  /* ---- right zone: two clean cards, slight rightward step ---- */
+  .cardwrap { position: absolute; }
+  .caption { font-size: 19px; letter-spacing: 4px; color: #7a8480;
+             margin-bottom: 12px; font-weight: 700; }
+  .card {
+    border-radius: 12px; border: 1px solid #2a2f36; overflow: hidden;
+    box-shadow: 0 30px 80px rgba(0,0,0,0.55); background: #0d0f14;
+  }
+  .card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  /* hero card 680x425 at (990,140); step card 620x388 at (1140,616) */
+  .hero { left: 990px; top: 140px; }
+  .hero .card { width: 680px; height: 425px; }
+  .step { left: 1140px; top: 616px; }
+  .step .card { width: 620px; height: 388px; }
+</style>
+</head>
+<body>
+
+  <div class="left">
+    <div class="eyebrow">DRIVEWAY&nbsp;&nbsp;/&nbsp;&nbsp;GDEYOUNG</div>
+    <h1>Every drive you own,<br>one click from the bar.</h1>
+    <div class="para">Thumb drives, disks and SD cards, SMB/NFS/sshfs
+      network shares, and rclone cloud mounts — mounted, browsed and
+      ejected from one tabbed bar panel. Mapped shares remount at login.</div>
+  </div>
+
+  <div class="bullets">
+    <div class="bcol a">
+      <div>Mount, open, eject — USB, disks, SD</div>
+      <div>Network shares remount at login</div>
+      <div>rclone cloud mounts, health states</div>
+      <div>Pending-upload awareness</div>
+    </div>
+    <div class="bcol b">
+      <div>Disk cache limits, global or per drive</div>
+      <div>Keyboard-first: 1·2·3, /, r</div>
+      <div>Settings right in the panel</div>
+      <div>Credentials encrypted, never argv</div>
+    </div>
+  </div>
+
+  <div class="cardwrap hero">
+    <div class="caption">THE PANEL — DRIVES · CLOUD · NETWORK</div>
+    <div class="card"><img src="cards/drives.png"></div>
+  </div>
+
+  <div class="cardwrap step">
+    <div class="caption">SETTINGS — NEW IN V0.4.2</div>
+    <div class="card"><img src="cards/settings.png"></div>
+  </div>
+
+  <div class="footer">
+    <div class="row">
+      <span>every drive, one place</span>
+      <span class="accent">gdeyoung.driveway&nbsp;&nbsp;v0.4.2</span>
+      <span>gdeyoung/omarchy-driveway</span>
+    </div>
+  </div>
+
+</body>
+</html>

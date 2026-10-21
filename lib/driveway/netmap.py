@@ -32,6 +32,10 @@ CONFIG_DIR = Path(os.environ.get("DRIVEWAY_CONFIG_DIR",
 MAPS_FILE = CONFIG_DIR / "maps.json"
 CREDS_DIR = CONFIG_DIR / "creds"
 CREDS_FALLBACK_PLAINTEXT = CONFIG_DIR / "creds-plaintext-warning"
+# The GTK bookmarks file is the one list every file manager on the box reads (flea's NETWORK
+# section, Nautilus' sidebar); a map that does not land here stays invisible outside driveway.
+BOOKMARKS_FILE = Path(os.environ.get("DRIVEWAY_BOOKMARKS",
+                                     Path.home() / ".config/gtk-3.0/bookmarks"))
 
 # avahi service type -> (scheme, label)
 SVC_KINDS = {
@@ -352,6 +356,34 @@ def _gvfs_path_for(url: str) -> str:
     return url
 
 
+# ------------------------------------------------------------ bookmarks
+
+def _bookmark_lines() -> list[str]:
+    try:
+        return BOOKMARKS_FILE.read_text().splitlines()
+    except OSError:
+        return []
+
+
+def _bookmark_add(url: str, label: str) -> None:
+    """Append the map's line to the GTK bookmarks file, idempotently by URL."""
+    lines = _bookmark_lines()
+    if any(l.split(" ")[0] == url for l in lines):
+        return
+    lines.append(f"{url} {label}".rstrip())
+    BOOKMARKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    BOOKMARKS_FILE.write_text("\n".join(lines) + "\n")
+
+
+def _bookmark_remove(url: str) -> None:
+    """Drop every line for this URL; an absent file is already clean."""
+    lines = _bookmark_lines()
+    kept = [l for l in lines if l.split(" ")[0] != url]
+    if kept == lines:
+        return
+    BOOKMARKS_FILE.write_text("\n".join(kept) + ("\n" if kept else ""))
+
+
 # ---------------------------------------------------------------- maps
 
 def _load_maps() -> dict:
@@ -394,6 +426,7 @@ def save_map(scheme: str, server: str, share: str | None = None,
     }
     maps[mid] = entry
     _save_maps(maps)
+    _bookmark_add(entry["url"], entry["label"])
     return entry
 
 
@@ -405,6 +438,7 @@ def forget_map(mid: str) -> bool:
     if entry.get("cred"):
         _cred_remove(entry["cred"])
     _save_maps(maps)
+    _bookmark_remove(entry["url"])
     return True
 
 

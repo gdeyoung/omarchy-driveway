@@ -29,6 +29,7 @@ def sandbox_env(tmp: Path) -> dict:
     netmap.MAPS_FILE = netmap.CONFIG_DIR / "maps.json"
     netmap.CREDS_DIR = netmap.CONFIG_DIR / "creds"
     netmap.CREDS_FALLBACK_PLAINTEXT = netmap.CONFIG_DIR / "creds-plaintext-warning"
+    netmap.BOOKMARKS_FILE = tmp / "bookmarks"
     wizard.RCLONE_CONF = tmp / "rclone.conf"
     return env
 
@@ -152,6 +153,12 @@ class TestMaps(unittest.TestCase):
                                 password="hunter2")
         self.assertTrue(netmap.MAPS_FILE.exists())
         self.assertEqual(netmap.MAPS_FILE.stat().st_mode & 0o777, 0o600)
+        # the map also lands in the bookmarks list every file manager reads
+        self.assertIn("smb://nas.local/media nas.local/media\n",
+                      netmap.BOOKMARKS_FILE.read_text())
+        netmap._bookmark_add("smb://nas.local/media", "another label")
+        self.assertEqual(netmap.BOOKMARKS_FILE.read_text().count("smb://nas.local/media"),
+                         1)  # idempotent by URL, and an existing line keeps its label
         maps = netmap.list_maps()
         self.assertEqual(len(maps), 1)
         self.assertEqual(maps[0]["label"], "nas.local/media")
@@ -161,6 +168,8 @@ class TestMaps(unittest.TestCase):
         self.assertIn(entry["cred_how"], ("encrypted", "plain"))
         self.assertTrue(netmap.forget_map(entry["id"]))
         self.assertEqual(netmap.list_maps(), [])
+        self.assertNotIn("smb://nas.local/media",
+                         netmap.BOOKMARKS_FILE.read_text())  # bookmark gone with the map
         with self.assertRaises(netmap.CredsError):
             netmap._cred_read(entry["cred"])  # forgotten along with the map
 
